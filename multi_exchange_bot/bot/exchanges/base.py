@@ -1,0 +1,13 @@
+from abc import ABC, abstractmethod
+
+class Exchange(ABC):
+    name: str
+
+    @abstractmethod
+    def market_buy_quote(self, symbol: str, quote_qty: str) -> dict: ...
+    @abstractmethod
+    def market_sell_base(self, symbol: str, base_qty: str) -> dict: ...
+    @abstractmethod
+    def normalize_symbol(self, symbol: str) -> str: ...
+    @abstractmethod
+    def probe_order_rtt(self, symbol: str, quote_qty: str) -> dict: ...
