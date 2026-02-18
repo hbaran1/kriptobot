@@ -1,2 +1,22 @@
 # Local Netlify folder
-.netlify
+.netlify/
+
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual envs
+.venv/
+venv/
+env/
+multi_exchange_bot/.venv312/
+
+# Secrets / local env files
+.env
+*.env
+multi_exchange_bot/.env
+
+# Runtime artifacts
+*.log
+*.pid
