@@ -584,7 +584,11 @@ def order_latency_probe(payload: LatencyProbePayload, x_pilot_token: Optional[st
     result = engine.probe_order_latency(ex, symbol_sent, spend)
     result = dict(result or {})
     result["attempt"] = 1
-    result["engine_latency_ms"] = int(result.get("engine_latency_ms") or 0)
+    ms_val = result.get("engine_latency_ms")
+    if isinstance(ms_val, (int, float)) and ms_val > 0:
+        result["engine_latency_ms"] = int(ms_val)
+    else:
+        result["engine_latency_ms"] = None
     result["auto_symbol"] = auto_symbol
 
     set_last_execution(ex, symbol_in, symbol_sent, "latency_probe", result)

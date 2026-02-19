@@ -1,5 +1,5 @@
 import os, re, time, threading, datetime, requests
-from flask import Flask, render_template_string, request, redirect, url_for
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify
 from dateutil import parser as dt_parser, tz
 from bot.listings_agg import ListingsAggregator
 from bot.util import iso_utc, tz_name
@@ -103,7 +103,7 @@ def read_env_file(path: str):
 
 def upsert_env_file(path: str, updates: dict):
     if not path:
-        raise ValueError("Env dosya yolu boş.")
+        raise ValueError("Env file path is empty.")
     folder = os.path.dirname(path)
     if folder:
         os.makedirs(folder, exist_ok=True)
@@ -148,717 +148,690 @@ def load_admin_state():
     return cfg, flags, dry_run
 
 HTML = """<!doctype html>
-<html lang="tr">
+<html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Yeni Listeleme İşlem Botu</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>quickbot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700;800&display=swap');
-    :root {
-      --bg: #FFF1B5;
-      --surface: #C1DBE8;
-      --line: #43302E;
-      --text: #43302E;
-      --muted: rgba(67, 48, 46, .78);
-      --accent: #43302E;
-      --accent-2: #C1DBE8;
-      --warn: #43302E;
-      --ok: #C1DBE8;
-      --shadow: rgba(67, 48, 46, .18);
-    }
-    * {
-      box-sizing: border-box;
-      font-family: "Lexend", "Segoe UI", "Noto Sans", sans-serif;
-    }
+    * { box-sizing: border-box; }
     body {
+      font-family: "Montserrat", sans-serif;
+      background-color: #ffffff;
+      color: #334155;
+      background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+      background-size: 24px 24px;
+      min-height: 100dvh;
+      height: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
       margin: 0;
-      color: var(--text);
-      background: var(--bg);
     }
-    .wrap {
-      max-width: 1240px;
-      margin: 0 auto;
-      padding: 18px 26px 16px;
+    .panel {
+      background: #ffffff;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      box-shadow: 0 4px 0 #e2e8f0;
     }
-    .top {
-      display: grid;
-      grid-template-columns: 1.2fr 1fr;
-      gap: 14px;
-      margin: 0 auto 14px;
-      max-width: 1160px;
+    .sidebar-link {
+      border: 1px solid transparent;
+      transition: all 0.2s;
     }
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 14px 16px;
-      box-shadow: 0 16px 40px -20px var(--shadow);
+    .sidebar-link:hover { border-color: #334155; background: #f8fafc; }
+    .sidebar-link.active { border-color: #334155; }
+    .input-box {
+      background: transparent;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      font-weight: 600;
+      transition: border-color 0.2s ease;
     }
-    .page-title-row {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0;
-      margin: 0 0 10px;
+    .input-box:focus { outline: none; border-color: #334155; }
+    .btn-main {
+      background: transparent;
+      border: 1px solid #334155;
+      color: #334155;
+      border-radius: 50px;
+      font-weight: 700;
+      text-transform: uppercase;
+      font-size: 13px;
+      letter-spacing: 1.3px;
+      transition: all 0.25s ease;
+      min-height: 52px;
     }
-    .page-title {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 800;
-      letter-spacing: .25px;
+    .btn-main:hover {
+      background: #334155;
+      color: #fff;
+      box-shadow: 0 4px 10px rgba(51, 65, 85, 0.2);
+      transform: translateY(-1px);
+    }
+    .buy-btn { border-color: #86efac; color: #166534; background: #f0fdf4; }
+    .buy-btn:hover { border-color: #16a34a; background: #16a34a; color: #fff; }
+    .stop-btn { border-color: #fecaca; color: #991b1b; background: #fef2f2; }
+    .stop-btn:hover { border-color: #ef4444; background: #ef4444; color: #fff; }
+    .chip {
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 4px 6px;
+      background: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      color: #334155;
+      cursor: pointer;
+      min-height: 28px;
+      line-height: 1;
+      transition: all 0.2s ease;
+      width: 100%;
       text-align: center;
     }
-    .system-dot {
-      width: 11px;
-      height: 11px;
-      border-radius: 999px;
-      display: inline-block;
-      border: 1px solid rgba(67, 48, 46, .35);
-      box-shadow: 0 0 0 1px rgba(255, 255, 255, .55) inset;
+    .chip:hover { transform: translateY(-1px); }
+    .chip.active { box-shadow: inset 0 0 0 2px #cbd5e1; }
+    .chip.ex-gate { background: #f8f0e2; }
+    .chip.ex-mexc { background: #eaf2f8; }
+    .chip.ex-kucoin { background: #f1eaf8; }
+    .chip.ex-bitget { background: #f7ede1; }
+    .chip.ex-binance { background: #e8f4ee; }
+    .latency-controls {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 4px;
+      align-items: center;
     }
-    .system-dot.online { background: #4bb86a; }
-    .system-dot.offline { background: #d66767; }
-    .system-state {
+    .tag-online {
+      border: 1px solid #86efac;
+      color: #166534;
+      background: #f0fdf4;
+      border-radius: 999px;
+    }
+    .tag-offline {
+      border: 1px solid #fecaca;
+      color: #991b1b;
+      background: #fef2f2;
+      border-radius: 999px;
+    }
+    .tab-btn {
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #334155;
+      background: #fff;
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      min-height: 30px;
+    }
+    .tab-btn:hover { transform: translateY(-1px); }
+    .tab-btn.active {
+      color: #1e293b;
+      box-shadow: inset 0 0 0 1.5px #334155;
+    }
+    .tab-btn[data-tab="gate"] { background: #f7eedf; }
+    .tab-btn[data-tab="mexc"] { background: #eaf2fb; }
+    .tab-btn[data-tab="kucoin"] { background: #f0e9f8; }
+    .tab-btn[data-tab="bitget"] { background: #f8efe3; }
+    .tab-btn[data-tab="binance"] { background: #e8f3ec; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      font-size: 10px;
+      padding: 2px 7px;
       font-weight: 700;
-      letter-spacing: .2px;
-      text-transform: lowercase;
+      line-height: 1;
     }
-    .system-state.online { color: #2f7f47; }
-    .system-state.offline { color: #9a3f3f; }
-    .status-indicator-row {
+    .pill.err { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+    .pill.new { background: #f0fdf4; border-color: #86efac; color: #166534; }
+    .exchange-panel { display: none; }
+    .exchange-panel.active { display: block; }
+    .check-ok { color: #166534; }
+    .check-bad { color: #991b1b; }
+    .pair-btn {
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      color: #334155;
+      background: transparent;
+      cursor: pointer;
+    }
+    .pair-btn:hover { background: #334155; color: #fff; }
+    .logs-row { display: flex; gap: 12px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 6px; }
+    .muted { color: #64748b; }
+    .countdown-box {
+      margin-top: 14px;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      text-align: center;
+      background: #f8fafc;
+    }
+    .countdown-value { font-size: 24px; font-weight: 300; letter-spacing: 0.8px; margin: 2px 0; }
+    .date-row { display: block; font-size: 13px; font-weight: 600; }
+    .poll-date-row { display: block; font-size: 11px; font-weight: 600; }
+    .status-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .status-block {
+      border: 1px solid #d6c9b2;
+      border-radius: 10px;
+      padding: 12px;
+      background: #fcf7ed;
+    }
+    .status-top {
       display: flex;
-      justify-content: flex-end;
-      margin-bottom: 2px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
     }
-    .muted {
-      color: var(--muted);
-      font-size: 13px;
+    .status-head {
+      font-size: 11px;
+      line-height: 1.35;
+      font-weight: 700;
+      letter-spacing: .4px;
+      text-transform: uppercase;
+      color: #475569;
+      margin: 0;
+    }
+    .brand-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .brand-title {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: .2px;
+      line-height: 1.1;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #1e293b;
+    }
+    .brand-wordmark {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0;
+      line-height: 1;
+    }
+    .brand-word-main { color: #1e293b; }
+    .brand-word-accent { color: #0f766e; }
+    .brand-tagline {
+      margin: 0 0 1px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .2px;
+      color: #64748b;
+      line-height: 1.2;
+    }
+    .brand-logo-shell {
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: 1px solid #334155;
+      background: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      flex: 0 0 auto;
+    }
+    .brand-logo-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .brand-logo-fallback {
+      display: none;
+      font-size: 16px;
+      line-height: 1;
+      color: #3f7ca0;
+    }
+    .status-live {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .4px;
+      color: #475569;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      display: inline-block;
     }
     .status-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 9px;
-      margin-top: 10px;
-      align-items: stretch;
-    }
-    .status-note {
-      position: relative;
-      background: #fff;
-      border: 1px solid rgba(67, 48, 46, .15);
-      border-radius: 14px;
-      min-height: 88px;
-      box-shadow: 0 10px 18px -16px rgba(67, 48, 46, .35);
-      padding: 6px;
-      transform-origin: 50% 12%;
-    }
-    .status-note::before {
-      content: "";
-      position: absolute;
-      top: -6px;
-      left: 50%;
-      width: 10px;
-      height: 10px;
-      border-radius: 999px;
-      transform: translateX(-50%);
-      box-shadow: 0 2px 8px rgba(67, 48, 46, .24);
-      background: #846044;
-    }
-    .status-note:nth-child(1)::before { background: #f07f5a; }
-    .status-note:nth-child(2)::before { background: #6f73b9; }
-    .status-note:nth-child(3)::before { background: #7b5ac7; }
-    .status-note:nth-child(4)::before { background: #d47f4a; }
-    .status-note:nth-child(1) .status-inner { background: #f8efe7; }
-    .status-note:nth-child(2) .status-inner { background: #eaf0ff; }
-    .status-note:nth-child(3) .status-inner { background: #efe5ff; }
-    .status-note:nth-child(4) .status-inner { background: #fff1e6; }
-    .status-note:nth-child(1) .status-label { color: #7a604f; }
-    .status-note:nth-child(2) .status-label { color: #566596; }
-    .status-note:nth-child(3) .status-label { color: #654796; }
-    .status-note:nth-child(4) .status-label { color: #8a5a3f; }
-
-    .status-note:hover { box-shadow: 0 12px 20px -16px rgba(67, 48, 46, .38); }
-    .status-inner {
-      border-radius: 10px;
-      min-height: 74px;
-      padding: 8px 7px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
-      border: 1px solid rgba(67, 48, 46, .08);
+      grid-template-columns: 1fr;
       gap: 4px;
+      margin-bottom: 9px;
     }
-    .status-inner { background: #f8efe7; }
-    .status-label {
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 700;
-      letter-spacing: .2px;
-      margin: 0;
-    }
-    .status-value {
-      font-size: 11px;
-      line-height: 1.3;
-      color: var(--text);
-      font-weight: 600;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-      margin: 0;
-    }
-    .iso-text {
-      font-size: 11px;
+    .status-line {
+      font-family: "Montserrat", sans-serif;
+      font-size: 14px;
+      line-height: 1.35;
       font-weight: 500;
+      color: #475569;
       letter-spacing: 0;
-      line-height: 1.25;
-      opacity: .92;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-      font-family: inherit;
     }
-    .status-note .iso-text {
-      font-size: 11px;
-      font-weight: 600;
+    .status-line.dim {
+      font-size: 14px;
       line-height: 1.3;
+      font-weight: 500;
+      color: #64748b;
+      letter-spacing: 0;
     }
-    .clock-date, .clock-time {
-      display: block;
-      text-align: center;
+    .pending-block {
+      margin-top: 0;
     }
-    .clock-time {
-      margin-top: 1px;
+    .pending-card {
+      border: 1px solid #d4deea;
+      border-radius: 10px;
+      background: #eef4fb;
+      padding: 9px 10px;
+      display: grid;
+      gap: 8px;
     }
-    .pill {
-      display: inline-block;
+    .pending-card.active {
+      border-color: #bfd0ea;
+      background: #e8f1ff;
+    }
+    .pending-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .pending-title {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.35;
+      color: #475569;
+      font-weight: 700;
+      letter-spacing: .4px;
+      text-transform: uppercase;
+    }
+    .pending-state {
+      display: inline-flex;
+      align-items: center;
       padding: 2px 8px;
       border-radius: 999px;
-      font-size: 11px;
-      border: 1px solid transparent;
-      margin-left: 8px;
+      font-size: 10px;
+      font-weight: 700;
+      border: 1px solid #cbd5e1;
+      color: #334155;
+      background: #fff;
+      line-height: 1.3;
     }
-    .pill.err { color: #FFF1B5; background: rgba(67, 48, 46, .75); border-color: #43302E; }
-    .pill.new { color: #43302E; background: rgba(193, 219, 232, .95); border-color: #C1DBE8; }
-    .pill.ok  { color: #43302E; background: rgba(193, 219, 232, .95); border-color: #C1DBE8; }
-    .pill.off { color: #FFF1B5; background: rgba(67, 48, 46, .75); border-color: #43302E; }
-    .action { margin: 2px 0 10px; font-size: 13px; }
-    .action.ok { color: var(--ok); }
-    .action.err { color: var(--warn); }
-    .trade-card {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+    .pending-state.yes {
+      border-color: #86efac;
+      color: #166534;
+      background: #f0fdf4;
     }
-    .trade-head {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 10px;
-    }
-    .trade-card h3 {
+    .pending-grid {
       margin: 0;
-      font-size: 16px;
-    }
-    .trade-hint {
-      margin: 0;
-      line-height: 1.45;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .form-grid {
       display: grid;
-      grid-template-columns: 1fr 1.15fr .95fr;
-      gap: 10px;
-      align-items: end;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 8px;
     }
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
+    .pending-item {
+      display: grid;
+      gap: 1px;
       min-width: 0;
     }
-    .field label {
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 700;
-      line-height: 1.2;
+    .pending-item span {
+      font-size: 11px;
+      color: #475569;
+      line-height: 1.25;
+      font-weight: 500;
     }
-    select, input, button {
-      border: 1px solid var(--line);
-      background: #FFF1B5;
-      color: #43302E;
-      border-radius: 10px;
-      padding: 10px 12px;
-      font-size: 14px;
-      outline: none;
-      min-height: 50px;
-      box-sizing: border-box;
-      width: 100%;
-    }
-    button {
-      cursor: pointer;
-      background: var(--accent);
-      border-color: var(--accent);
-      font-weight: 600;
-      color: #FFF1B5;
-    }
-    .link-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid #43302E;
-      background: rgba(193, 219, 232, .75);
-      color: #43302E;
-      border-radius: 10px;
-      padding: 8px 12px;
-      font-size: 13px;
-      font-weight: 700;
-      text-decoration: none;
-    }
-    .link-btn:hover {
-      background: rgba(193, 219, 232, .95);
-      text-decoration: none;
-    }
-    .link-btn.icon-only {
-      width: 44px;
-      min-width: 44px;
-      min-height: 44px;
-      padding: 0;
-      border-radius: 999px;
-      font-size: 22px;
-      line-height: 1;
-      font-family: "Segoe UI Symbol", "Apple Symbols", "Noto Sans Symbols 2", "Noto Sans Symbols", sans-serif;
-    }
-    button.disarm {
-      background: #C1DBE8;
-      border-color: #43302E;
-      color: #43302E;
-    }
-    .action-row {
-      margin-top: 2px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      width: 100%;
-    }
-    .action-row form { margin: 0; }
-    .action-row button {
-      min-width: 200px;
-      max-width: 260px;
-    }
-    .action-row .buy-btn {
-      background: #8fc9a1;
-      color: #2f3d31;
-      border-color: #7fb891;
-    }
-    .action-row .buy-btn:hover {
-      background: #7dbb90;
-      border-color: #6ea885;
-    }
-    .action-row .stop-btn {
-      background: #e6a3a3;
-      color: #4a2f2f;
-      border-color: #d59292;
-    }
-    .action-row .stop-btn:hover {
-      background: #d98f8f;
-      border-color: #c97d7d;
-    }
-    .countdown-box {
-      margin-top: 10px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 12px;
-      background: rgba(255, 241, 181, .72);
-      text-align: center;
-    }
-    .countdown-value {
-      font-size: 24px;
-      font-weight: 800;
-      letter-spacing: .8px;
-      margin: 4px 0;
-    }
-    .help-line {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .metric-box {
-      margin: 8px 0 10px;
-      border: 1px solid rgba(67, 48, 46, .3);
-      border-radius: 10px;
-      background: rgba(255, 241, 181, .7);
-      padding: 8px 10px;
-    }
-    .metric-title {
+    .pending-item b {
       font-size: 12px;
       font-weight: 700;
-      color: var(--muted);
-      margin: 0 0 4px;
+      color: #1e293b;
+      line-height: 1.25;
+      word-break: break-word;
     }
-    .metric-line {
-      font-size: 13px;
-      font-weight: 600;
-      line-height: 1.45;
+    .pending-empty {
       margin: 0;
-    }
-    .mini-form {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      margin-bottom: 10px;
-      flex-wrap: wrap;
-    }
-    .mini-form select {
-      min-width: 190px;
-    }
-    .latency-single {
-      margin-top: 8px;
-    }
-    .latency-controls {
-      display: flex;
-      align-items: stretch;
-      gap: 8px;
-      margin-bottom: 8px;
-      flex-wrap: nowrap;
-      overflow-x: auto;
-      padding-bottom: 2px;
-    }
-    .latency-chip {
-      min-height: 34px;
-      padding: 6px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(67, 48, 46, .35);
-      background: #f2e6d8;
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 700;
-      width: auto;
-      min-width: auto;
-      white-space: nowrap;
-      cursor: pointer;
-    }
-    .latency-chip.active {
-      box-shadow: inset 0 0 0 2px rgba(67, 48, 46, .35);
-    }
-    .latency-chip.ex-gate { background: #f2e6d8; }
-    .latency-chip.ex-mexc { background: #e2ecf4; }
-    .latency-chip.ex-kucoin { background: #ebe3f2; }
-    .latency-chip.ex-bitget { background: #efe3d7; }
-    .latency-chip.ex-binance { background: #ddebe7; }
-    .latency-line {
-      font-size: 12px;
+      font-size: 11px;
+      color: #64748b;
       line-height: 1.35;
-      color: var(--text);
-      margin: 2px 0;
     }
-    .latency-detail {
-      border: 1px solid rgba(67, 48, 46, .2);
-      border-radius: 10px;
-      background: #f2e6d8;
-      padding: 9px 10px;
-      display: block;
-    }
-    .latency-detail.ex-gate { background: #f2e6d8; }
-    .latency-detail.ex-mexc { background: #e2ecf4; }
-    .latency-detail.ex-kucoin { background: #ebe3f2; }
-    .latency-detail.ex-bitget { background: #efe3d7; }
-    .latency-detail.ex-binance { background: #ddebe7; }
-    .ok-t { color: #2f6a2f; font-weight: 700; }
-    .tabs {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin: 0 auto 10px;
-      max-width: 1160px;
-    }
-    .tab-btn {
-      border: 1px solid #43302E;
-      background: rgba(193, 219, 232, .45);
-      color: #43302E;
-      border-radius: 999px;
-      padding: 6px 12px;
-      cursor: pointer;
-      font-size: 13px;
-      width: auto;
-      min-width: auto;
-      min-height: 34px;
-      line-height: 1;
-      display: inline-flex;
-      align-items: center;
-      white-space: nowrap;
-    }
-    .tab-btn.active {
-      border-color: #43302E;
-      background: rgba(67, 48, 46, .16);
-    }
-    .panel {
-      display: none;
-      max-width: 1160px;
-      margin: 0 auto;
-    }
-    .panel.active { display: block; }
-    .check-line {
-      margin: 2px 0 8px;
-      font-size: 13px;
-      font-weight: 700;
-    }
-    .check-ok { color: #2f6a2f; }
-    .check-bad { color: #7f2f2f; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      overflow: hidden;
-      border-radius: 14px;
-      border: 1px solid #43302E;
-      background: rgba(255, 241, 181, .58);
-    }
+    .table-wrap { overflow: auto; border: 1px solid #e2e8f0; border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
     th, td {
-      padding: 10px;
-      border-bottom: 1px solid rgba(67, 48, 46, .18);
       text-align: left;
       vertical-align: top;
-      font-size: 13px;
+      padding: 10px;
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 12px;
     }
     th {
-      color: #43302E;
-      font-size: 12px;
-      letter-spacing: .2px;
-      background: rgba(193, 219, 232, .65);
-    }
-    a {
-      color: #43302E;
-      text-decoration: none;
-      word-break: break-all;
-    }
-    a:hover { text-decoration: underline; }
-    .pair-btn {
-      border: 1px solid var(--line);
-      background: rgba(255, 241, 181, .9);
-      color: var(--text);
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 12px;
-      cursor: pointer;
-      font-weight: 700;
-      min-width: 92px;
-    }
-    .pair-btn:hover {
-      background: #fff6d4;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: #64748b;
+      background: #f8fafc;
     }
     .empty {
-      padding: 12px;
-      border: 1px dashed #43302E;
-      border-radius: 12px;
-      color: var(--muted);
-      background: rgba(193, 219, 232, .35);
-      font-size: 13px;
+      border: 1px dashed #94a3b8;
+      border-radius: 10px;
+      padding: 14px;
+      font-size: 14px;
+      color: #64748b;
+      background: #f8fafc;
     }
-    @media (max-width: 1200px) {
-      .top { grid-template-columns: 1fr; }
+    .latency-line b {
+      font-size: 11px;
+      letter-spacing: .7px;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-right: 8px;
     }
-    @media (max-width: 1020px) {
-      .top { grid-template-columns: 1fr; }
-      .status-grid { grid-template-columns: 1fr; }
-      .form-grid { grid-template-columns: 1fr; }
-      .status-label { font-size: 12px; }
-      .status-value { font-size: 11px; }
-      .status-note { transform: none !important; }
+    .latency-line { margin: 0; font-size: 16px; font-weight: 400; }
+    .news-list { display: flex; flex-direction: column; gap: 6px; }
+    .news-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 6px 8px;
+      background: #f8fafc;
     }
-    @media (max-width: 760px) {
-      .latency-controls { gap: 6px; }
-      .trade-head { flex-direction: column; align-items: stretch; }
-      .action-row { flex-direction: column; }
-      .action-row button { max-width: none; min-width: 0; }
+    .news-title-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      margin-bottom: 4px;
     }
+    .news-title {
+      font-size: 11px;
+      line-height: 1.25;
+      font-weight: 700;
+      color: #334155;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      flex: 1;
+    }
+    .news-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 10px;
+      color: #64748b;
+    }
+    .news-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .news-open {
+      font-size: 10px;
+      font-weight: 700;
+      color: #334155;
+      text-decoration: none;
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      padding: 3px 7px;
+      background: #fff;
+      line-height: 1;
+    }
+    .news-open:hover { border-color: #334155; }
+    @media (max-width: 1280px) {
+      .brand-title { font-size: 19px; }
+      .brand-tagline { font-size: 10px; }
+    }
+    @media (max-width: 1024px) {
+      .status-line { font-size: 13px; }
+      .pending-grid { grid-template-columns: 1fr; }
+      .news-meta {
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+      .news-actions { width: 100%; justify-content: flex-start; }
+    }
+    @media (max-width: 640px) {
+      .status-block { padding: 10px; }
+      .pending-card { padding: 8px 9px; }
+      .status-top { flex-wrap: wrap; align-items: flex-start; }
+      .status-live { font-size: 10px; }
+      .tab-btn { padding: 6px 9px; font-size: 10px; min-height: 28px; }
+      .latency-line { font-size: 14px; }
+      .countdown-value { font-size: 20px; }
+      .logs-row {
+        flex-direction: column;
+        gap: 4px;
+      }
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
   </style>
 </head>
-<body>
-  <div class="wrap">
-    <div class="page-title-row">
-      <h1 class="page-title">Yeni Listeleme İşlem Botu</h1>
-    </div>
-    <div class="top">
-      <section class="card">
-        <div class="status-indicator-row">
-          <span class="system-state {{ 'online' if exec_state['online'] else 'offline' }}">
-            <span
-              class="system-dot {{ 'online' if exec_state['online'] else 'offline' }}"
-              title="{{ 'Çevrimiçi' if exec_state['online'] else 'Çevrimdışı' }}"
-            ></span>
-            <span>{{ 'live' if exec_state['online'] else 'off' }}</span>
+<body class="flex flex-col min-h-screen">
+  <div class="flex-1 flex overflow-visible">
+    <main class="w-full py-5 px-4 sm:px-6 md:px-10 xl:px-16 2xl:px-24 flex flex-col min-w-0 overflow-visible xl:overflow-y-auto relative gap-5 sm:gap-6">
+      <header class="panel p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
+        <div class="brand-wrap">
+        <h2 class="text-xl font-bold text-slate-800 tracking-tight m-0 flex items-center gap-2 brand-title">
+          <span class="brand-logo-shell" aria-hidden="true">
+            <img src="/static/quickbot-logo.png" class="brand-logo-img" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex';">
+            <span class="brand-logo-fallback">⚡</span>
           </span>
+          <span class="brand-wordmark"><span class="brand-word-main">quick</span><span class="brand-word-accent">bot</span></span>
+        </h2>
+        <p class="brand-tagline">Spot listings. Faster entries. Cleaner execution.</p>
         </div>
-        <div class="status-grid">
-          <div class="status-note">
-            <div class="status-inner">
-              <div class="status-label">Son Kontrol:</div>
-              <div class="status-value">
+        <div class="px-3 py-1 flex items-center gap-2 text-xs font-bold {{ 'tag-online' if exec_state['online'] else 'tag-offline' }}">
+          <span class="w-1.5 h-1.5 rounded-full {{ 'bg-green-600 animate-pulse' if exec_state['online'] else 'bg-red-600' }}"></span>
+          {{ 'System Online' if exec_state['online'] else 'System Offline' }}
+        </div>
+      </header>
+
+      <div class="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-5 sm:gap-6 min-h-0 pb-4">
+        {% set latency_selected = last_order.get("exchange") if last_order.get("exchange") in exchanges else exchanges[0] %}
+        {% set latency_selected_row = order_latency.get(latency_selected) or {} %}
+        <div class="xl:col-span-5 xl:row-span-2 panel p-4 sm:p-5 md:p-6 min-h-0 xl:min-h-[520px] flex flex-col">
+          <div class="status-stack">
+            <div class="status-block">
+              <div class="status-top">
+                <p class="status-head">Last Check</p>
+                <span class="status-live">
+                  <span class="status-live-dot {{ 'bg-green-500' if exec_state['online'] else 'bg-red-500' }}"></span>
+                  {{ 'live' if exec_state['online'] else 'off' }}
+                </span>
+              </div>
+              <div class="status-grid">
                 {% if last_poll_parts %}
-                  <span class="iso-text clock-date">{{last_poll_parts["date"]}}</span>
-                  <span class="iso-text clock-time">{{last_poll_parts["time"]}} (TSI)</span>
+                  <span class="status-line">{{last_poll_parts["date"]}}</span>
+                  <span class="status-line">{{last_poll_parts["time"]}} (TRT)</span>
                 {% else %}
-                  <span class="iso-text">henüz yok</span>
+                  <span class="status-line dim">no data yet</span>
+                {% endif %}
+              </div>
+            </div>
+            <div class="pending-block">
+              <div class="pending-card {{ 'active' if pending_info else '' }}">
+                <div class="pending-top">
+                  <p class="pending-title">Pending</p>
+                  <span class="pending-state {{ 'yes' if pending_info else '' }}">{{ "yes" if pending_info else "no" }}</span>
+                </div>
+                {% if pending_info %}
+                  <div class="pending-grid">
+                    <div class="pending-item"><span>Exchange</span><b>{{pending_info["exchange"]}}</b></div>
+                    <div class="pending-item"><span>Status</span><b>{{pending_info["phase"]}}</b></div>
+                    <div class="pending-item"><span>Pair</span><b>{{pending_info["symbol"]}}</b></div>
+                    <div class="pending-item"><span>Amount</span><b>{{pending_info["spend_usdt"]}} USDT</b></div>
+                    {% if pending_info.get("target_display") %}
+                      <div class="pending-item"><span>Target</span><b>{{pending_info["target_display"]}}</b></div>
+                    {% endif %}
+                  </div>
+                {% else %}
+                  <p class="pending-empty">No active pending order.</p>
                 {% endif %}
               </div>
             </div>
           </div>
-          <div class="status-note">
-            <div class="status-inner">
-              <div class="status-label">Bekleyen İşlem:</div>
-              <div class="status-value">{{ "var" if exec_state["gate"].get("armed") else "yok" }}</div>
-            </div>
-          </div>
-        </div>
-        <div class="latency-single">
-          {% set latency_selected = last_order.get("exchange") if last_order.get("exchange") in exchanges else exchanges[0] %}
-          {% set latency_selected_row = order_latency.get(latency_selected) or {} %}
-          <div class="latency-controls">
+
+          <div class="mt-5 flex flex-wrap gap-2">
             {% for ex in exchanges %}
               {% set row = order_latency.get(ex) or {} %}
               <button
-                type="button"
-                class="latency-chip ex-{{ex}} {% if ex == latency_selected %}active{% endif %}"
+                class="tab-btn latency-chip {% if loop.first %}active{% endif %}"
+                data-tab="{{ex}}"
                 data-latency-ex="{{ex}}"
                 data-ms="{{row.get('engine_latency_text') or '-'}}"
-              >{{ex}}</button>
+              >
+                {{ex}}
+                {% if errors.get(ex) %}<span class="pill err" title="{{errors.get(ex)[:120]}}">ERR</span>{% endif %}
+              </button>
             {% endfor %}
           </div>
-          <div class="latency-detail ex-{{latency_selected}}" id="latency-detail">
-            <div class="latency-line"><b>Süre:</b> <span id="latency-ms-view">{{latency_selected_row.get("engine_latency_text") or "-"}}</span></div>
+
+          <div class="mt-3 panel !shadow-none !border-slate-200 !rounded-[10px] p-2 bg-slate-50" id="latency-detail">
+            <p class="latency-line"><b>Latency</b><span id="latency-ms-view">{{latency_selected_row.get("engine_latency_text") or "-"}}</span></p>
           </div>
           <form id="probe-form" method="POST" action="/probe-latency" style="display:none">
             <input type="hidden" name="probe_exchange" id="probe-exchange" value="{{latency_selected}}">
             <input type="hidden" name="probe_symbol" id="probe-symbol" value="">
             <input type="hidden" name="probe_spend_usdt" id="probe-spend" value="{{last_order.get('spend_usdt','5')}}">
           </form>
-        </div>
-      </section>
 
-      <section class="card trade-card">
-        <div class="trade-head">
-          <a class="link-btn icon-only" href="/admin" aria-label="Admin Ayarları" title="Admin Ayarları">&#9881;</a>
+          <div class="mt-3 flex-1 overflow-visible xl:overflow-y-auto pr-1">
+            {% for ex in exchanges %}
+              <section class="exchange-panel {% if loop.first %}active{% endif %}" id="panel-{{ex}}">
+                <p class="text-sm font-bold mb-2">
+                  {% if checks.get(ex) is sameas true %}
+                    <span class="check-ok">✓ Feed checked</span>
+                  {% elif checks.get(ex) is sameas false %}
+                    <span class="check-bad">✕ Feed check failed</span>
+                  {% else %}
+                    <span class="muted">Waiting for check...</span>
+                  {% endif %}
+                </p>
+                {% if listings[ex] %}
+                  <div class="news-list">
+                    {% for item in listings[ex][:16] %}
+                      <div class="news-item">
+                        <div class="news-title-row">
+                          <div class="news-title" title="{{item['title']}}">{{item["title"]}}</div>
+                          {% if item["is_new"] %}<span class="pill new">NEW</span>{% endif %}
+                        </div>
+                        <div class="news-meta">
+                          <span>{{item["trade_start_display"]}}</span>
+                          <span class="news-actions">
+                            {% if item.get("pair_guess") %}
+                              <button class="pair-btn" type="button" data-pair="{{item['pair_guess']}}" data-exchange="{{ex}}">{{item["pair_guess"]}}</button>
+                            {% endif %}
+                            <a href="{{item["url"]}}" target="_blank" rel="noopener" class="news-open">Open</a>
+                          </span>
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <div class="empty">
+                    {% if errors.get(ex) %}
+                      Data could not be fetched for this exchange.
+                      {% if friendly_errors.get(ex) %} {{friendly_errors.get(ex)}}{% endif %}
+                    {% else %}
+                      No new listings found for this exchange.
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </section>
+            {% endfor %}
+          </div>
         </div>
-        <form method="POST" action="/arm" class="form-grid" id="arm-form">
-          <div class="field">
-            <label>Borsa</label>
-            <select name="exchange" id="exchange-select">
-              {% for ex in exchanges %}
-                <option value="{{ex}}" {% if last_order.get("exchange") == ex %}selected{% endif %}>{{ex}}</option>
-              {% endfor %}
-            </select>
+
+        <div class="xl:col-span-7 panel p-4 sm:p-6 md:p-8 flex flex-col trade-panel">
+          <div class="flex items-center justify-between mb-6 md:mb-8">
+            <h3 class="text-lg font-bold text-slate-800 m-0">Quick Trade</h3>
+            <a href="/admin" class="w-10 h-10 rounded-full border border-[#334155] flex items-center justify-center text-[#334155] hover:bg-slate-50 no-underline text-xl leading-none font-semibold" aria-label="Admin Settings" title="Admin Settings">
+              ⚙
+            </a>
           </div>
-          <div class="field">
-            <label>Parite</label>
-            <input id="symbol-input" name="symbol" placeholder="ABC_USDT / ABCUSDT / ABC-USDT" value="{{last_order.get('symbol','')}}" required>
-          </div>
-          <div class="field">
-            <label>USDT Tutarı</label>
-            <input id="spend-input" name="spend_usdt" type="number" min="0.01" step="0.01" value="{{last_order.get('spend_usdt','5')}}" required>
-          </div>
-        </form>
-        <div class="action-row">
-          <button type="submit" class="buy-btn" form="arm-form">Alış</button>
-          <form method="POST" action="/stop-buy">
-            <button type="submit" class="stop-btn">Satış</button>
+
+          <form method="POST" action="/arm" class="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 mb-6 md:mb-8" id="arm-form">
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Exchange</label>
+              <select class="input-box w-full p-3 text-slate-700 outline-none cursor-pointer font-bold text-sm bg-white" name="exchange" id="exchange-select">
+                {% for ex in exchanges %}
+                  <option value="{{ex}}" {% if last_order.get("exchange") == ex %}selected{% endif %}>{{ex}}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Pair</label>
+              <input id="symbol-input" name="symbol" type="text" class="input-box w-full p-3 text-slate-700 outline-none font-bold text-sm bg-white" placeholder="ABC_USDT / ABCUSDT / ABC-USDT" value="{{last_order.get('symbol','')}}" required>
+            </div>
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Amount (USDT)</label>
+              <input id="spend-input" name="spend_usdt" type="number" min="0.01" step="0.01" value="{{last_order.get('spend_usdt','5')}}" class="input-box w-full p-3 text-slate-700 outline-none font-bold text-sm bg-white" required>
+            </div>
           </form>
-        </div>
-        {% if countdown %}
-          <div class="countdown-box" data-target="{{countdown['target_iso']}}" id="countdown-box">
-            <div><b>{{countdown["exchange"]}} / {{countdown["symbol"]}}</b> için kalan süre</div>
-            <div class="countdown-value" id="countdown-value">--:--:--</div>
-            <div class="muted">{{countdown["target_iso"]}}</div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 mt-auto">
+            <button type="submit" form="arm-form" class="btn-main buy-btn py-4 flex items-center justify-center gap-2 shadow-sm">
+              <span>Buy</span>
+            </button>
+            <form method="POST" action="/stop-buy">
+              <button type="submit" class="btn-main stop-btn py-4 flex items-center justify-center gap-2 shadow-sm w-full">
+                <span>Sell</span>
+              </button>
+            </form>
           </div>
-        {% endif %}
-      </section>
-    </div>
 
-    <div class="tabs">
-      {% for ex in exchanges %}
-        <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="{{ex}}">
-          {{ex}}
-          {% if errors.get(ex) %}<span class="pill err" title="{{errors.get(ex)[:120]}}">ERR</span>{% endif %}
-        </button>
-      {% endfor %}
-    </div>
-
-    {% for ex in exchanges %}
-      <section class="panel {% if loop.first %}active{% endif %}" id="panel-{{ex}}">
-        <div class="check-line">
-          {% if checks.get(ex) is sameas true %}
-            <span class="check-ok">✓ Liste kontrol edildi</span>
-          {% elif checks.get(ex) is sameas false %}
-            <span class="check-bad">✕ Liste kontrol edilemedi</span>
-          {% else %}
-            <span class="muted">Kontrol bekleniyor...</span>
+          {% if countdown %}
+            <div class="countdown-box" data-target="{{countdown['target_iso']}}" id="countdown-box">
+              <div>Time remaining for <b>{{countdown["exchange"]}} / {{countdown["symbol"]}}</b></div>
+              <div class="countdown-value" id="countdown-value">--:--:--</div>
+              <div class="muted text-sm">{{countdown["target_iso"]}}</div>
+            </div>
           {% endif %}
         </div>
-        {% if listings[ex] %}
-          <table>
-            <thead>
-              <tr>
-                <th>Başlık</th>
-                <th>Detected</th>
-                <th>Trade Başlangıç</th>
-                <th>Parite</th>
-                <th>Link</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for item in listings[ex] %}
-                <tr>
-                  <td>
-                    <b>{{item["title"]}}</b>
-                    {% if item["is_new"] %}<span class="pill new">NEW</span>{% endif %}
-                  </td>
-                  <td>
-                    {% if item.get("detected_parts") %}
-                      <span class="iso-text clock-date">{{item["detected_parts"]["date"]}}</span>
-                      <span class="iso-text clock-time">{{item["detected_parts"]["time"]}} (TSI)</span>
-                    {% else %}
-                      <span class="iso-text">-</span>
-                    {% endif %}
-                  </td>
-                  <td>
-                    <div><b>{{item["trade_start_display"]}}</b></div>
-                    {% if not item.get("trade_start_ok") %}
-                      <div class="muted">Duyuruda net trade başlangıç saati bulunamadı.</div>
-                    {% endif %}
-                  </td>
-                  <td>
-                    {% if item.get("pair_guess") %}
-                      <button class="pair-btn" type="button" data-pair="{{item['pair_guess']}}" data-exchange="{{ex}}">{{item["pair_guess"]}}</button>
-                    {% else %}
-                      <span class="muted">-</span>
-                    {% endif %}
-                  </td>
-                  <td><a href="{{item["url"]}}" target="_blank" rel="noopener">open</a></td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        {% else %}
-          <div class="empty">
-            {% if errors.get(ex) %}
-              Bu borsa için veri alınamadı.
-              {% if friendly_errors.get(ex) %} {{friendly_errors.get(ex)}}{% endif %}
-            {% else %}
-              Bu borsa için şu an yeni listing bulunamadı.
-            {% endif %}
+
+        <div class="xl:col-span-7 panel p-4 min-h-[144px] font-mono text-xs overflow-hidden bg-slate-50">
+          {% if last_action %}
+            <div class="logs-row">
+              <span class="text-slate-400 w-20">status</span>
+              <span class="font-bold {{ 'text-green-700' if last_action.get('ok') else 'text-red-700' }}">{{last_action.get("text","-")}}</span>
+            </div>
+          {% endif %}
+          {% if last_exec %}
+            <div class="logs-row">
+              <span class="text-slate-400 w-20">last order</span>
+              <span>{{last_exec.get("exchange","-")}} / {{last_exec.get("symbol","-")}} / {{last_exec.get("engine_latency_text","-")}}</span>
+            </div>
+          {% endif %}
+          <div class="logs-row">
+            <span class="text-slate-400 w-20">poll</span>
+            <span>{{last_poll or "no data yet"}}</span>
           </div>
-        {% endif %}
-      </section>
-    {% endfor %}
+        </div>
+      </div>
+    </main>
   </div>
 
   <script>
     const tabs = document.querySelectorAll('.tab-btn');
-    const panels = document.querySelectorAll('.panel');
+    const panels = document.querySelectorAll('.exchange-panel[id^="panel-"]');
     const exchangeSelect = document.getElementById('exchange-select');
     const symbolInput = document.getElementById('symbol-input');
     const spendInput = document.getElementById('spend-input');
@@ -866,9 +839,9 @@ HTML = """<!doctype html>
     const probeExchangeInput = document.getElementById('probe-exchange');
     const probeSymbolInput = document.getElementById('probe-symbol');
     const probeSpendInput = document.getElementById('probe-spend');
-    const latencyDetail = document.getElementById('latency-detail');
     const latencyMsView = document.getElementById('latency-ms-view');
     const latencyChips = document.querySelectorAll('.latency-chip[data-latency-ex]');
+
     tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
         const key = tab.getAttribute('data-tab');
@@ -880,8 +853,7 @@ HTML = """<!doctype html>
       });
     });
 
-    const pairButtons = document.querySelectorAll('.pair-btn');
-    pairButtons.forEach((btn) => {
+    document.querySelectorAll('.pair-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const pair = btn.getAttribute('data-pair') || '';
         const ex = btn.getAttribute('data-exchange') || '';
@@ -890,7 +862,7 @@ HTML = """<!doctype html>
           symbolInput.value = pair;
           symbolInput.focus();
         }
-        const topCard = document.querySelector('.trade-card');
+        const topCard = document.querySelector('.trade-panel');
         if (topCard) topCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
     });
@@ -903,10 +875,6 @@ HTML = """<!doctype html>
       const ms = chip.getAttribute('data-ms') || '-';
       if (latencyMsView) latencyMsView.textContent = ms;
       if (probeExchangeInput && ex) probeExchangeInput.value = ex;
-      if (latencyDetail) {
-        latencyDetail.classList.remove('ex-gate', 'ex-mexc', 'ex-kucoin', 'ex-bitget', 'ex-binance');
-        if (ex) latencyDetail.classList.add('ex-' + ex);
-      }
     };
 
     latencyChips.forEach((chip) => {
@@ -917,10 +885,31 @@ HTML = """<!doctype html>
           const spend = (spendInput && spendInput.value) ? spendInput.value : (probeSpendInput.value || '5');
           probeSpendInput.value = spend;
         }
-        if (probeForm) {
-          if (typeof probeForm.requestSubmit === 'function') probeForm.requestSubmit();
-          else probeForm.submit();
-        }
+        const formData = new URLSearchParams();
+        formData.set('probe_exchange', (probeExchangeInput && probeExchangeInput.value) ? probeExchangeInput.value : '');
+        formData.set('probe_symbol', (probeSymbolInput && probeSymbolInput.value) ? probeSymbolInput.value : '');
+        formData.set('probe_spend_usdt', (probeSpendInput && probeSpendInput.value) ? probeSpendInput.value : '5');
+
+        fetch('/probe-latency', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+          },
+          body: formData.toString()
+        })
+        .then(async (res) => {
+          let data = {};
+          try { data = await res.json(); } catch (_) {}
+          if (!res.ok || !data.ok) throw new Error((data && data.error) ? data.error : 'Request failed');
+          const txt = (data && data.latency_text) ? data.latency_text : '-';
+          chip.setAttribute('data-ms', txt);
+          if (latencyMsView) latencyMsView.textContent = txt;
+        })
+        .catch(() => {
+          if (latencyMsView) latencyMsView.textContent = chip.getAttribute('data-ms') || '-';
+        });
       });
     });
 
@@ -953,260 +942,289 @@ HTML = """<!doctype html>
         const hh = String(hours).padStart(2, '0');
         const mm = String(mins).padStart(2, '0');
         const ss = String(secs).padStart(2, '0');
-        countdownValue.textContent = days > 0 ? `${days}g ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
+        countdownValue.textContent = days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
       };
       tick();
       setInterval(tick, 1000);
     }
-
   </script>
 </body>
 </html>"""
 
 ADMIN_HTML = """<!doctype html>
-<html lang="tr">
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Admin Ayarları</title>
+  <title>Admin Settings</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700;800&display=swap');
-    :root {
-      --bg: #DDD7CE;
-      --panel: #f5f1ea;
-      --card: #ffffff;
-      --line: #5b534a;
-      --text: #2e2925;
-      --muted: rgba(46, 41, 37, .72);
-      --ok: #2f6a2f;
-      --err: #8a2f2f;
-      --btn: #43302E;
-      --btn-text: #f7efe4;
-      --chip: #e7ddd2;
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Montserrat", sans-serif;
+      background-color: #ffffff;
+      color: #334155;
+      background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+      background-size: 24px 24px;
+      min-height: 100dvh;
+      margin: 0;
     }
-    * { box-sizing: border-box; font-family: "Lexend", sans-serif; }
-    body { margin: 0; background: var(--bg); color: var(--text); }
-    .wrap { max-width: 1260px; margin: 0 auto; padding: 18px; }
-    .top-card {
-      background: var(--panel);
-      border: 1px solid rgba(91, 83, 74, .3);
-      border-radius: 16px;
-      padding: 14px 16px;
-      margin-bottom: 14px;
-      box-shadow: 0 14px 26px -22px rgba(67, 48, 46, .35);
-    }
-    h1 { margin: 0; font-size: 22px; }
-    .sub { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
-    .field { display: flex; flex-direction: column; gap: 4px; }
-    .field label { font-size: 12px; font-weight: 700; color: var(--muted); }
-    input, select, button {
-      border: 1px solid rgba(91, 83, 74, .45);
-      border-radius: 10px;
-      background: #fff;
-      color: var(--text);
-      padding: 8px 10px;
-      font-size: 13px;
-      outline: none;
-    }
-    input:focus, select:focus { border-color: #43302E; box-shadow: 0 0 0 2px rgba(67,48,46,.09); }
-    .msg { padding: 10px 12px; border-radius: 10px; margin-top: 10px; font-size: 13px; }
-    .msg.ok { background: rgba(47,106,47,.12); border: 1px solid rgba(47,106,47,.34); color: var(--ok); }
-    .msg.err { background: rgba(127,47,47,.12); border: 1px solid rgba(127,47,47,.34); color: var(--err); }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .ex-card {
-      background: var(--card);
-      border: 1px solid rgba(91, 83, 74, .35);
-      border-radius: 14px;
-      padding: 12px;
-      box-shadow: 0 14px 24px -20px rgba(67, 48, 46, .35);
-    }
-    .ex-card h3 {
-      margin: 0 0 8px;
-      font-size: 15px;
-      letter-spacing: .1px;
-    }
-    .ex-fields {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 8px;
-    }
-    .full { grid-column: 1 / -1; }
-    .chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin-left: 6px;
-      background: var(--chip);
-      border: 1px solid rgba(91, 83, 74, .22);
-      color: #5f564d;
-      border-radius: 999px;
-      padding: 1px 7px;
-      font-size: 11px;
-      font-weight: 700;
-      vertical-align: middle;
-    }
-    .sticky-actions {
-      position: sticky;
-      bottom: 10px;
-      margin-top: 14px;
-      display: flex;
-      justify-content: flex-end;
-      gap: 8px;
-      background: rgba(221, 215, 206, .86);
-      backdrop-filter: blur(2px);
+    .panel {
+      background: #ffffff;
+      border: 1px solid #334155;
       border-radius: 12px;
-      padding: 8px;
+      box-shadow: 0 4px 0 #e2e8f0;
     }
-    .link-btn {
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.1;
+      color: #1e293b;
+    }
+    .brand-wordmark {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0;
+      line-height: 1;
+    }
+    .brand-word-main { color: #1e293b; }
+    .brand-word-accent { color: #0f766e; }
+    .brand-word-sub { color: #334155; opacity: .78; }
+    .brand-icon {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      border: 1px solid rgba(91, 83, 74, .45);
-      background: #f9f5ee;
-      color: var(--text);
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: 1px solid #334155;
+      background: #fff;
+      overflow: hidden;
+    }
+    .brand-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .sub {
+      margin: 5px 0 0;
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .field { display: grid; gap: 5px; }
+    .field label { font-size: 11px; font-weight: 700; letter-spacing: .3px; color: #64748b; text-transform: uppercase; }
+    input, button {
+      border: 1px solid #cbd5e1;
       border-radius: 10px;
-      padding: 10px 13px;
-      font-size: 14px;
+      background: #fff;
+      color: #334155;
+      padding: 10px 11px;
+      font-size: 13px;
+      font-weight: 600;
+      outline: none;
+      width: 100%;
+    }
+    input:focus { border-color: #334155; box-shadow: 0 0 0 2px rgba(51,65,85,.08); }
+    .msg { padding: 10px 12px; border-radius: 10px; margin-top: 10px; font-size: 13px; font-weight: 600; }
+    .msg.ok { background: #f0fdf4; border: 1px solid #86efac; color: #166534; }
+    .msg.err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .ex-card {
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+      box-shadow: 0 4px 0 #e2e8f0;
+      display: grid;
+      gap: 10px;
+    }
+    .ex-card h3 {
+      margin: 0;
+      font-size: 15px;
       font-weight: 700;
+      color: #1e293b;
+      letter-spacing: .2px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 6px;
+      border-radius: 999px;
+      border: 1px solid #86efac;
+      background: #f0fdf4;
+      color: #166534;
+      padding: 1px 7px;
+      font-size: 10px;
+      font-weight: 700;
+      vertical-align: middle;
+      line-height: 1.2;
+    }
+    .actions {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .btn {
+      border: 1px solid #334155;
+      border-radius: 50px;
+      background: #fff;
+      color: #334155;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .6px;
+      text-transform: uppercase;
       text-decoration: none;
+      min-height: 46px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all .2s ease;
     }
-    button {
-      cursor: pointer;
-      font-weight: 700;
-      background: var(--btn);
-      color: var(--btn-text);
-      border-color: var(--btn);
-      min-width: 210px;
+    .btn:hover { background: #334155; color: #fff; }
+    .btn.primary {
+      background: #334155;
+      color: #fff;
     }
-    @media (max-width: 1100px) {
-      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .btn.primary:hover {
+      background: #1e293b;
+      border-color: #1e293b;
     }
-    @media (max-width: 760px) {
-      .grid { grid-template-columns: 1fr; }
+    @media (max-width: 1200px) {
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .cards { grid-template-columns: 1fr; }
+      .actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <form method="POST" action="/admin">
-      <section class="top-card">
-        <h1>Admin Ayarları</h1>
-        <p class="sub">Borsa API bilgilerini kartlardan düzenle. Gizli alanı boş bırakırsan mevcut değer korunur.</p>
+  <main class="w-full py-5 px-4 sm:px-6 md:px-10 xl:px-16 2xl:px-24 flex flex-col gap-5">
+    <section class="panel p-4">
+      <form method="POST" action="/admin">
+        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-2">
+          <h1 class="brand">
+            <span class="brand-icon" aria-hidden="true">
+              <img src="/static/quickbot-logo.png" alt="" onerror="this.style.display='none';this.parentElement.textContent='⚡';this.parentElement.style.color='#3f7ca0';this.parentElement.style.fontSize='16px';">
+            </span>
+            <span class="brand-wordmark"><span class="brand-word-main">quick</span><span class="brand-word-accent">bot</span></span><span class="brand-word-sub">admin</span>
+          </h1>
+          <a class="btn" href="/">Back to Panel</a>
+        </div>
+        <p class="sub">Manage exchange API credentials. Leave secret fields empty to keep existing values.</p>
         {% if msg %}
           <div class="msg {{ 'ok' if ok else 'err' }}">{{msg}}</div>
         {% endif %}
-      </section>
 
-      <section class="grid">
-        <article class="ex-card">
-          <h3>Gate.io</h3>
-          <div class="ex-fields">
+        <section class="cards mt-4">
+          <article class="ex-card">
+            <h3>Gate.io</h3>
             <div class="field">
-              <label>API Key {% if flags["GATE_KEY"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="GATE_KEY" placeholder="değiştirmek için yaz">
+              <label>API Key {% if flags["GATE_KEY"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="GATE_KEY" placeholder="type to update">
             </div>
             <div class="field">
-              <label>API Secret {% if flags["GATE_SECRET"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="GATE_SECRET" placeholder="değiştirmek için yaz">
+              <label>API Secret {% if flags["GATE_SECRET"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="GATE_SECRET" placeholder="type to update">
             </div>
-            <div class="field full">
+            <div class="field">
               <label>Base URL</label>
               <input name="GATE_BASE" value="{{cfg['GATE_BASE']}}">
             </div>
-          </div>
-        </article>
+          </article>
 
-        <article class="ex-card">
-          <h3>Binance</h3>
-          <div class="ex-fields">
+          <article class="ex-card">
+            <h3>Binance</h3>
             <div class="field">
-              <label>API Key {% if flags["BINANCE_KEY"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="BINANCE_KEY" placeholder="değiştirmek için yaz">
+              <label>API Key {% if flags["BINANCE_KEY"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="BINANCE_KEY" placeholder="type to update">
             </div>
             <div class="field">
-              <label>API Secret {% if flags["BINANCE_SECRET"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="BINANCE_SECRET" placeholder="değiştirmek için yaz">
+              <label>API Secret {% if flags["BINANCE_SECRET"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="BINANCE_SECRET" placeholder="type to update">
             </div>
-            <div class="field full">
+            <div class="field">
               <label>Base URL</label>
               <input name="BINANCE_BASE" value="{{cfg['BINANCE_BASE']}}">
             </div>
-          </div>
-        </article>
+          </article>
 
-        <article class="ex-card">
-          <h3>MEXC</h3>
-          <div class="ex-fields">
+          <article class="ex-card">
+            <h3>MEXC</h3>
             <div class="field">
-              <label>API Key {% if flags["MEXC_KEY"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="MEXC_KEY" placeholder="değiştirmek için yaz">
+              <label>API Key {% if flags["MEXC_KEY"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="MEXC_KEY" placeholder="type to update">
             </div>
             <div class="field">
-              <label>API Secret {% if flags["MEXC_SECRET"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="MEXC_SECRET" placeholder="değiştirmek için yaz">
+              <label>API Secret {% if flags["MEXC_SECRET"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="MEXC_SECRET" placeholder="type to update">
             </div>
-            <div class="field full">
+            <div class="field">
               <label>Base URL</label>
               <input name="MEXC_BASE" value="{{cfg['MEXC_BASE']}}">
             </div>
-          </div>
-        </article>
+          </article>
 
-        <article class="ex-card">
-          <h3>KuCoin</h3>
-          <div class="ex-fields">
+          <article class="ex-card">
+            <h3>KuCoin</h3>
             <div class="field">
-              <label>API Key {% if flags["KUCOIN_KEY"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="KUCOIN_KEY" placeholder="değiştirmek için yaz">
+              <label>API Key {% if flags["KUCOIN_KEY"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="KUCOIN_KEY" placeholder="type to update">
             </div>
             <div class="field">
-              <label>API Secret {% if flags["KUCOIN_SECRET"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="KUCOIN_SECRET" placeholder="değiştirmek için yaz">
+              <label>API Secret {% if flags["KUCOIN_SECRET"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="KUCOIN_SECRET" placeholder="type to update">
             </div>
             <div class="field">
-              <label>Passphrase {% if flags["KUCOIN_PASSPHRASE"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="KUCOIN_PASSPHRASE" placeholder="değiştirmek için yaz">
+              <label>Passphrase {% if flags["KUCOIN_PASSPHRASE"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="KUCOIN_PASSPHRASE" placeholder="type to update">
             </div>
             <div class="field">
               <label>Base URL</label>
               <input name="KUCOIN_BASE" value="{{cfg['KUCOIN_BASE']}}">
             </div>
-          </div>
-        </article>
+          </article>
 
-        <article class="ex-card">
-          <h3>Bitget</h3>
-          <div class="ex-fields">
+          <article class="ex-card">
+            <h3>Bitget</h3>
             <div class="field">
-              <label>API Key {% if flags["BITGET_KEY"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="BITGET_KEY" placeholder="değiştirmek için yaz">
+              <label>API Key {% if flags["BITGET_KEY"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="BITGET_KEY" placeholder="type to update">
             </div>
             <div class="field">
-              <label>API Secret {% if flags["BITGET_SECRET"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="BITGET_SECRET" placeholder="değiştirmek için yaz">
+              <label>API Secret {% if flags["BITGET_SECRET"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="BITGET_SECRET" placeholder="type to update">
             </div>
             <div class="field">
-              <label>Passphrase {% if flags["BITGET_PASSPHRASE"] %}<span class="chip">kayıtlı</span>{% endif %}</label>
-              <input type="password" name="BITGET_PASSPHRASE" placeholder="değiştirmek için yaz">
+              <label>Passphrase {% if flags["BITGET_PASSPHRASE"] %}<span class="chip">saved</span>{% endif %}</label>
+              <input type="password" name="BITGET_PASSPHRASE" placeholder="type to update">
             </div>
             <div class="field">
               <label>Base URL</label>
               <input name="BITGET_BASE" value="{{cfg['BITGET_BASE']}}">
             </div>
-          </div>
-        </article>
-      </section>
+          </article>
+        </section>
 
-      <div class="sticky-actions">
-        <a class="link-btn" href="/">Panele Dön</a>
-        <button type="submit">Ayarları Kaydet ve Uygula</button>
-      </div>
-    </form>
-  </div>
+        <div class="actions">
+          <a class="btn" href="/">Back to Panel</a>
+          <button type="submit" class="btn primary">Save and Apply Settings</button>
+        </div>
+      </form>
+    </section>
+  </main>
 </body>
 </html>"""
 
@@ -1302,7 +1320,7 @@ def format_latency_text(ms_value):
     if ms <= 0:
         return "-"
     sec = ms / 1000.0
-    return f"{ms} ms ({sec:.3f} sn)"
+    return f"{ms} ms ({sec:.3f} sec)"
 
 
 def parse_iso_time(value: str):
@@ -1320,9 +1338,9 @@ def parse_iso_time(value: str):
 def format_clock(value: str):
     dt = parse_iso_time(value)
     if dt is None:
-        return value or "henüz yok"
+        return value or "no data yet"
     dt_tr = dt.astimezone(TR_TZ) if TR_TZ else dt
-    return dt_tr.strftime("%d.%m.%Y %H:%M:%S (TSI)")
+    return dt_tr.strftime("%d.%m.%Y %H:%M:%S (TRT)")
 
 
 def split_clock_parts(value: str):
@@ -1407,9 +1425,9 @@ def guess_pair(item):
 def format_trade_start(item):
     dt = parse_item_time(item)
     if dt is None:
-        return "BELIRSIZ"
+        return "UNKNOWN"
     dt_tr = dt.astimezone(TR_TZ) if TR_TZ else dt
-    return dt_tr.strftime("%Y-%m-%d %H:%M:%S (TSI)")
+    return dt_tr.strftime("%Y-%m-%d %H:%M:%S (TRT)")
 
 
 def humanize_error(err: str):
@@ -1419,19 +1437,19 @@ def humanize_error(err: str):
     if m:
         code = m.group(1)
         if code == "403":
-            return "Erişim engellendi (HTTP 403)."
+            return "Access blocked (HTTP 403)."
         if code == "404":
-            return "Kaynak bulunamadı (HTTP 404)."
+            return "Resource not found (HTTP 404)."
         if code == "429":
-            return "İstek limiti aşıldı (HTTP 429)."
+            return "Rate limit exceeded (HTTP 429)."
         if code.startswith("5"):
-            return f"Borsa sunucu hatası (HTTP {code})."
-        return f"HTTP hatası ({code})."
+            return f"Exchange server error (HTTP {code})."
+        return f"HTTP error ({code})."
     if "Timeout" in err or "ReadTimeout" in err or "ConnectTimeout" in err:
-        return "Zaman aşımı: borsa yanıt vermedi."
+        return "Timeout: exchange did not respond."
     if "ConnectionError" in err:
-        return "Bağlantı hatası: borsaya ulaşılamadı."
-    return "Veri alınırken hata oluştu."
+        return "Connection error: exchange unreachable."
+    return "An error occurred while fetching data."
 
 
 def filter_out_expired(listings):
@@ -1528,7 +1546,7 @@ def index():
         for item in listings[ex]:
             disp = format_trade_start(item)
             item["trade_start_display"] = disp
-            item["trade_start_ok"] = disp != "BELIRSIZ"
+            item["trade_start_ok"] = disp != "UNKNOWN"
             raw_pair = guess_pair(item)
             item["pair_guess"] = normalize_symbol_for_exchange(ex, raw_pair) if raw_pair else ""
             item["detected_display"] = format_clock(item.get("detected_at", ""))
@@ -1545,6 +1563,31 @@ def index():
             last_order.get("exchange", ""),
             last_order.get("symbol", ""),
         )
+    pending_info = None
+    gate_state = dict(exec_state.get("gate") or {})
+    if gate_state.get("armed"):
+        p_exchange = str(gate_state.get("exchange") or last_order.get("exchange") or "gate").strip().lower() or "gate"
+        p_symbol = (
+            str(gate_state.get("symbol") or "").strip()
+            or str(last_order.get("symbol_normalized") or "").strip()
+            or str(last_order.get("symbol") or "").strip()
+            or "-"
+        )
+        p_spend = (
+            str(gate_state.get("spend_usdt") or "").strip()
+            or str(last_order.get("spend_usdt") or "").strip()
+            or "?"
+        )
+        p_phase = str(gate_state.get("phase") or "armed").strip() or "armed"
+        pending_info = {
+            "exchange": p_exchange,
+            "symbol": p_symbol,
+            "spend_usdt": p_spend,
+            "phase": p_phase,
+            "target_display": "",
+        }
+        if countdown and countdown.get("exchange") == p_exchange:
+            pending_info["target_display"] = format_clock(countdown.get("target_iso", ""))
     return render_template_string(
         HTML,
         exchanges=agg.exchanges,
@@ -1562,6 +1605,7 @@ def index():
         last_action=STATE.get("last_action"),
         countdown=countdown,
         last_order=last_order,
+        pending_info=pending_info,
     )
 
 
@@ -1579,13 +1623,13 @@ def arm():
     }
 
     if ex not in agg.exchanges:
-        set_action(False, "Geçersiz borsa seçimi.")
+        set_action(False, "Invalid exchange selection.")
         return redirect(url_for("index"))
     if not symbol:
-        set_action(False, "Symbol/pair boş bırakılamaz.")
+        set_action(False, "Symbol/pair cannot be empty.")
         return redirect(url_for("index"))
     if not norm_symbol:
-        set_action(False, "Symbol/pair formatı çözülemedi.")
+        set_action(False, "Symbol/pair format could not be parsed.")
         return redirect(url_for("index"))
 
     try:
@@ -1594,16 +1638,16 @@ def arm():
         countdown = find_countdown_target(ex, norm_symbol, app.config.get("LISTINGS") or {})
         STATE["countdown"] = countdown
         if ex == "gate" or mode == "ws_trigger":
-            base_msg = f"{ex} için işlem hazırlandı: {norm_symbol}."
+            base_msg = f"Order prepared for {ex}: {norm_symbol}."
         else:
-            base_msg = f"{ex} için alım isteği gönderildi ({norm_symbol})."
+            base_msg = f"Buy request sent to {ex} ({norm_symbol})."
         if countdown:
-            set_action(True, base_msg + " Geri sayım başlatıldı.")
+            set_action(True, base_msg + " Countdown started.")
         else:
-            set_action(True, base_msg + " Bu parite için ileri tarihli listing saati bulunamadı.")
+            set_action(True, base_msg + " No future listing time found for this pair.")
     except Exception as e:
         STATE["countdown"] = None
-        set_action(False, f"Başlat işlemi başarısız: {e}")
+        set_action(False, f"Start action failed: {e}")
     return redirect(url_for("index"))
 
 
@@ -1615,13 +1659,13 @@ def stop_buy():
         STATE["countdown"] = None
         forced = out.get("forced_buy") if isinstance(out, dict) else None
         if isinstance(forced, dict) and forced.get("error"):
-            set_action(False, f"Alım durduruldu, zorunlu alım başarısız: {forced['error']}")
+            set_action(False, f"Buy stopped, forced buy failed: {forced['error']}")
         elif forced is not None:
-            set_action(True, "Alım durduruldu. Aktif süreç için zorunlu market alım gönderildi.")
+            set_action(True, "Buy stopped. Forced market buy sent for active process.")
         else:
-            set_action(True, "Alım durduruldu.")
+            set_action(True, "Buy stopped.")
     except Exception as e:
-        set_action(False, f"Alımı durdurma işlemi başarısız: {e}")
+        set_action(False, f"Stop-buy action failed: {e}")
     return redirect(url_for("index"))
 
 
@@ -1641,23 +1685,33 @@ def exchange_test():
             total += 1
             if row.get("network_ok") and (row.get("auth_ok") in (True, None)):
                 ok_count += 1
-        set_action(True, f"Borsa iletişim testi tamamlandı: {ok_count}/{total} başarılı.")
+        set_action(True, f"Exchange connectivity test completed: {ok_count}/{total} successful.")
     except Exception as e:
-        set_action(False, f"Borsa iletişim testi başarısız: {e}")
+        set_action(False, f"Exchange connectivity test failed: {e}")
     return redirect(url_for("index"))
 
 
 @app.route("/probe-latency", methods=["POST"])
 def probe_latency():
+    wants_json = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in (request.headers.get("Accept") or "")
+    )
     ex = request.form.get("probe_exchange", "").strip().lower()
     symbol = request.form.get("probe_symbol", "").strip()
     spend = request.form.get("probe_spend_usdt", "5").strip()
     if ex not in agg.exchanges:
-        set_action(False, "Geçersiz borsa seçimi.")
+        msg = "Invalid exchange selection."
+        set_action(False, msg)
+        if wants_json:
+            return jsonify({"ok": False, "error": msg}), 400
         return redirect(url_for("index"))
     norm_symbol = normalize_symbol_for_exchange(ex, symbol) if symbol else ""
     if symbol and not norm_symbol:
-        set_action(False, "Parite formatı çözülemedi.")
+        msg = "Pair format could not be parsed."
+        set_action(False, msg)
+        if wants_json:
+            return jsonify({"ok": False, "error": msg}), 400
         return redirect(url_for("index"))
     try:
         out = executor_post("/order-latency", {"exchange": ex, "symbol": norm_symbol, "spend_usdt": spend})
@@ -1666,13 +1720,25 @@ def probe_latency():
         txt = format_latency_text(ms)
         sent_symbol = probe.get("symbol_sent") if isinstance(probe, dict) else "-"
         auto_symbol = bool(probe.get("auto_symbol")) if isinstance(probe, dict) else False
-        symbol_note = f"{sent_symbol} (otomatik)" if auto_symbol else sent_symbol
+        symbol_note = f"{sent_symbol} (auto)" if auto_symbol else sent_symbol
         if txt != "-":
-            set_action(True, f"{ex} emir hattı ölçümü: {txt} ({symbol_note}).")
+            set_action(True, f"{ex} order-route measurement: {txt} ({symbol_note}).")
         else:
-            set_action(True, f"{ex} emir hattı ölçümü tamamlandı ({symbol_note}).")
+            set_action(False, f"{ex} order-route measurement returned no verified exchange RTT ({symbol_note}).")
+        if wants_json:
+            return jsonify(
+                {
+                    "ok": True,
+                    "exchange": ex,
+                    "latency_text": txt,
+                    "symbol_note": symbol_note,
+                }
+            )
     except Exception as e:
-        set_action(False, f"Emir hattı ölçümü başarısız: {e}")
+        msg = f"Order-route measurement failed: {e}"
+        set_action(False, msg)
+        if wants_json:
+            return jsonify({"ok": False, "error": msg}), 500
     return redirect(url_for("index"))
 
 
@@ -1683,11 +1749,11 @@ def set_dry_run():
     try:
         out = executor_post("/dry-run", {"enabled": enabled})
         if out.get("dry_run", enabled):
-            set_action(True, "Test modu açıldı. Gerçek emir gönderilmez.")
+            set_action(True, "Test mode enabled. Real orders are not sent.")
         else:
-            set_action(True, "Gerçek mod açıldı. Emirler borsaya gönderilir.")
+            set_action(True, "Live mode enabled. Orders are sent to exchanges.")
     except Exception as e:
-        set_action(False, f"Mod güncellenemedi: {e}")
+        set_action(False, f"Mode could not be updated: {e}")
     return redirect(url_for("index"))
 
 
@@ -1722,13 +1788,13 @@ def admin_settings():
                 os.environ[key] = value
             try:
                 executor_post("/admin/config", {"dry_run": dry_run, "values": runtime_values})
-                msg = "Ayarlar kaydedildi ve canlı olarak uygulandı."
+                msg = "Settings saved and applied live."
             except Exception as e:
                 ok = False
-                msg = f"Ayarlar kaydedildi fakat executor'a uygulanamadı: {e}"
+                msg = f"Settings saved, but could not be applied to executor: {e}"
         except Exception as e:
             ok = False
-            msg = f"Ayarlar kaydedilemedi: {e}"
+            msg = f"Settings could not be saved: {e}"
 
     cfg, flags, _ = load_admin_state()
     return render_template_string(

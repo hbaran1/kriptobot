@@ -102,20 +102,23 @@ class TradeEngine:
         # Real RTT probe for order path without executing trades.
         ex = self._ex(exchange)
         norm_symbol = ex.normalize_symbol(symbol)
-        t0 = time.perf_counter()
         try:
             result = dict(ex.probe_order_rtt(norm_symbol, spend_usdt) or {})
         except Exception as e:
             return {
                 "status": None,
                 "body": {"message": f"{type(e).__name__}: {e}"},
-                "engine_latency_ms": int((time.perf_counter() - t0) * 1000),
+                "engine_latency_ms": None,
                 "probe_type": "probe_exception",
                 "safe_no_trade": True,
                 "dry_run": False,
                 "symbol_norm": norm_symbol,
             }
-        result["engine_latency_ms"] = int(result.get("latency_ms") or int((time.perf_counter() - t0) * 1000))
+        latency_ms = result.get("latency_ms")
+        if isinstance(latency_ms, (int, float)) and latency_ms > 0:
+            result["engine_latency_ms"] = int(latency_ms)
+        else:
+            result["engine_latency_ms"] = None
         result["dry_run"] = False
         result["symbol_norm"] = norm_symbol
         result["safe_no_trade"] = bool(result.get("safe_no_trade", True))
