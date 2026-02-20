@@ -1,45 +1,126 @@
-import os, time, hmac, hashlib, urllib.parse
+import os
+import time
+import hmac
+import hashlib
+import urllib.parse
+import statistics
+import threading
+
 import requests
+from requests.adapters import HTTPAdapter
+
 from .base import Exchange
+
 
 class Binance(Exchange):
     name = "binance"
+
     def __init__(self):
-        self.key = os.getenv("BINANCE_KEY","")
-        self.secret = os.getenv("BINANCE_SECRET","").encode()
-        self.base = os.getenv("BINANCE_BASE","https://api.binance.com").rstrip("/")
+        self.key = os.getenv("BINANCE_KEY", "")
+        self.secret = os.getenv("BINANCE_SECRET", "").encode()
+        self.base = os.getenv("BINANCE_BASE", "https://api.binance.com").rstrip("/")
+
+        self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+        self._offset_lock = threading.Lock()
+        self.offset_ms = 0
+        self.offset_rtt_median_ms = None
+        self.offset_synced_at_ms = None
 
     def normalize_symbol(self, symbol: str) -> str:
-        return symbol.replace("_","").replace("-","").upper()
+        return symbol.replace("_", "").replace("-", "").upper()
+
+    def _timeout(self, timeout_sec, default_sec: float) -> float:
+        try:
+            t = float(timeout_sec)
+            if t > 0:
+                return t
+        except Exception:
+            pass
+        return default_sec
+
+    def _extract_server_time_ms(self, payload: dict) -> int:
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"unexpected /api/v3/time payload: {payload}")
+        raw = payload.get("serverTime")
+        if raw is None:
+            raise RuntimeError(f"serverTime missing in payload: {payload}")
+        val = int(float(raw))
+        if val < 10_000_000_000:
+            return int(val * 1000)
+        return val
+
+    def _fetch_server_time_ms(self, timeout_sec: float = 1.5) -> int:
+        r = self.session.get(self.base + "/api/v3/time", timeout=self._timeout(timeout_sec, 1.5))
+        r.raise_for_status()
+        return self._extract_server_time_ms(safe_json(r))
+
+    def sync_server_offset(self, samples: int = 5, per_request_timeout: float = 1.5) -> dict:
+        sample_n = max(1, int(samples))
+        offsets = []
+        rtts = []
+        for _ in range(sample_n):
+            t0 = int(time.time() * 1000)
+            server_ms = self._fetch_server_time_ms(timeout_sec=per_request_timeout)
+            t1 = int(time.time() * 1000)
+            rtt = max(0, t1 - t0)
+            local_mid = t0 + (rtt / 2.0)
+            offsets.append(int(server_ms - local_mid))
+            rtts.append(rtt)
+
+        if not offsets:
+            raise RuntimeError("offset sync failed: no samples")
+
+        median_offset = int(statistics.median(offsets))
+        median_rtt = int(statistics.median(rtts)) if rtts else None
+        with self._offset_lock:
+            self.offset_ms = median_offset
+            self.offset_rtt_median_ms = median_rtt
+            self.offset_synced_at_ms = int(time.time() * 1000)
+
+        return {
+            "offset_ms": median_offset,
+            "rtt_median_ms": median_rtt,
+            "samples": sample_n,
+            "synced_at_ms": self.offset_synced_at_ms,
+        }
+
+    def current_timestamp_ms(self) -> int:
+        with self._offset_lock:
+            offset = int(self.offset_ms or 0)
+        return int(time.time() * 1000) + offset
 
     def _signed(self, params: dict) -> dict:
         params = dict(params)
-        params["timestamp"] = int(time.time()*1000)
+        params["timestamp"] = self.current_timestamp_ms()
         qs = urllib.parse.urlencode(params, doseq=True)
         sig = hmac.new(self.secret, qs.encode(), hashlib.sha256).hexdigest()
         return {"qs": qs + "&signature=" + sig, "headers": {"X-MBX-APIKEY": self.key}}
 
-    def market_buy_quote(self, symbol: str, quote_qty: str) -> dict:
+    def market_buy_quote(self, symbol: str, quote_qty: str, timeout_sec=None) -> dict:
         sym = self.normalize_symbol(symbol)
-        params = {"symbol": sym, "side":"BUY", "type":"MARKET", "quoteOrderQty": quote_qty}
+        params = {"symbol": sym, "side": "BUY", "type": "MARKET", "quoteOrderQty": quote_qty}
         signed = self._signed(params)
-        r = requests.post(self.base + "/api/v3/order", headers=signed["headers"], params=signed["qs"], timeout=10)
+        r = self.session.post(self.base + "/api/v3/order", headers=signed["headers"], params=signed["qs"], timeout=self._timeout(timeout_sec, 10.0))
         return {"status": r.status_code, "body": safe_json(r)}
 
-    def market_sell_base(self, symbol: str, base_qty: str) -> dict:
+    def market_sell_base(self, symbol: str, base_qty: str, timeout_sec=None) -> dict:
         sym = self.normalize_symbol(symbol)
-        params = {"symbol": sym, "side":"SELL", "type":"MARKET", "quantity": base_qty}
+        params = {"symbol": sym, "side": "SELL", "type": "MARKET", "quantity": base_qty}
         signed = self._signed(params)
-        r = requests.post(self.base + "/api/v3/order", headers=signed["headers"], params=signed["qs"], timeout=10)
+        r = self.session.post(self.base + "/api/v3/order", headers=signed["headers"], params=signed["qs"], timeout=self._timeout(timeout_sec, 10.0))
         return {"status": r.status_code, "body": safe_json(r)}
 
     def probe_order_rtt(self, symbol: str, quote_qty: str) -> dict:
         sym = self.normalize_symbol(symbol)
         # Binance test endpoint validates order path/signature without executing a trade.
-        params = {"symbol": sym, "side":"BUY", "type":"MARKET", "quoteOrderQty": quote_qty}
+        params = {"symbol": sym, "side": "BUY", "type": "MARKET", "quoteOrderQty": quote_qty}
         signed = self._signed(params)
         t0 = time.perf_counter()
-        r = requests.post(self.base + "/api/v3/order/test", headers=signed["headers"], params=signed["qs"], timeout=6)
+        r = self.session.post(self.base + "/api/v3/order/test", headers=signed["headers"], params=signed["qs"], timeout=0.8)
         return {
             "status": r.status_code,
             "body": safe_json(r),
@@ -48,6 +129,32 @@ class Binance(Exchange):
             "safe_no_trade": True,
         }
 
+    def warmup_connection(self, timeout_sec: float = 1.5, sync_samples: int = 0, **kwargs) -> dict:
+        t0 = time.perf_counter()
+        try:
+            r = self.session.get(self.base + "/api/v3/time", timeout=self._timeout(timeout_sec, 1.5))
+            out = {
+                "ok": r.status_code < 500,
+                "status": r.status_code,
+                "latency_ms": int((time.perf_counter() - t0) * 1000),
+            }
+            if sync_samples and out["ok"]:
+                try:
+                    out["sync"] = self.sync_server_offset(samples=sync_samples, per_request_timeout=timeout_sec)
+                except Exception as e:
+                    out["sync_error"] = f"{type(e).__name__}: {e}"
+            return out
+        except Exception as e:
+            return {
+                "ok": False,
+                "status": None,
+                "latency_ms": int((time.perf_counter() - t0) * 1000),
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+
 def safe_json(r):
-    try: return r.json()
-    except Exception: return {"text": r.text[:2000]}
+    try:
+        return r.json()
+    except Exception:
+        return {"text": r.text[:2000]}

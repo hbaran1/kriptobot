@@ -10,9 +10,13 @@ TRADE_CONTEXT_PATTERNS = {
     r"trading\s+will\s+start\s+at[^.]{0,180}",
     r"(?:will\s+be|is)\s+listed\s+at[^.]{0,180}",
     r"start\s+trading\s+at[^.]{0,180}",
+    r"spot\s+trading\s+opens?\s*:\s*[^.]{0,180}",
+    r"for\s+spot\s+trading\s+on[^.]{0,180}",
   ],
   "binance": [
     r"trading\s+will\s+open\s+at[^.]{0,180}",
+    r"trading[^.]{0,80}will\s+open\s+at[^.]{0,180}",
+    r"will\s+open\s+for\s+trading\s+at[^.]{0,180}",
     r"will\s+list[^.]{0,120}\s+at[^.]{0,120}",
     r"trading\s+starts?\s+at[^.]{0,180}",
   ],
@@ -20,6 +24,8 @@ TRADE_CONTEXT_PATTERNS = {
     r"trading\s+will\s+start\s+at[^.]{0,180}",
     r"trading\s+in\s+the\s+[^.]{0,60}\s*:\s*[^.]{0,180}",
     r"(?:will\s+be|gets)\s+listed[^.]{0,120}\s+at[^.]{0,120}",
+    r"listing\s+time\s*:?\s*[^.]{0,180}",
+    r"(?:spot|innovation|meme\+?)\s+trading\s*:?\s*[^.]{0,180}",
   ],
   "kucoin": [
     r"trading\s*:\s*[^.]{0,180}",
@@ -31,10 +37,31 @@ TRADE_CONTEXT_PATTERNS = {
     r"trading\s+starts?\s+at[^.]{0,180}",
     r"open\s+for\s+trading[^.]{0,180}",
   ],
+  "okex": [
+    r"trading\s+will\s+open\s+at[^.]{0,180}",
+    r"spot\s+trading\s+for\s+[^.]{0,80}\s+will\s+open[^.]{0,180}",
+    r"will\s+be\s+listed[^.]{0,180}",
+  ],
+  "bybit": [
+    r"trading\s+will\s+open\s+at[^.]{0,180}",
+    r"will\s+be\s+available\s+for\s+trading[^.]{0,180}",
+    r"spot\s+listing[^.]{0,180}",
+  ],
+  "btcturk": [
+    r"işlem\s+başlangıç\s+tarihi[^.]{0,180}",
+    r"trading\s+start[^.]{0,180}",
+    r"işleme\s+açılacaktır[^.]{0,180}",
+  ],
+  "paribu": [
+    r"işlem\s+saati[^.]{0,180}",
+    r"listelenecek[^.]{0,180}",
+    r"trading\s+will\s+open\s+at[^.]{0,180}",
+  ],
 }
 
 DATE_PATTERNS = [
   r"[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4},?\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:\((?:UTC|GMT)\)|UTC|GMT|UTC[+-]\d{1,2})?",
+  r"[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4},?\s*at\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:\((?:UTC|GMT)\)|UTC|GMT|UTC[+-]\d{1,2})?",
   r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:\((?:UTC|GMT)\)|UTC|GMT|UTC[+-]\d{1,2})?",
   r"\d{1,2}:\d{2}(?::\d{2})?\s+on\s+[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}\s*(?:\((?:UTC|GMT)\)|UTC|GMT|UTC[+-]\d{1,2})?",
 ]
