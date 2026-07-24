@@ -1,150 +1,427 @@
 #!/usr/bin/env python3
+"""P01 strict census: official Binance 1h candles, wick-inclusive +20% events.
+
+Only fresh official archive bytes fetched in this run are used. No prior cohort,
+count, cache, report, production database, or live service is read.
+"""
 from __future__ import annotations
-import concurrent.futures as cf, hashlib, io, json, os, re, time, urllib.error, urllib.request, zipfile
+
+import concurrent.futures as cf
+import hashlib
+import io
+import json
+import os
+import re
+import time
+import urllib.error
+import urllib.request
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-R=Path(__file__).resolve().parent; O=R/'artifacts'; O.mkdir(parents=True,exist_ok=True)
-S3='https://s3-ap-northeast-1.amazonaws.com/data.binance.vision'
-A='https://data.binance.vision/data/spot'
-MONTHS=['2025-12','2026-01','2026-02','2026-03','2026-04','2026-05','2026-06']
-START=1767225600000; END=1782864000000; M=60000
-TH=(.05,.10,.15,.20,.30); IGN=.03; BRAKE=3.; LIQ=100000.
-LEV=re.compile(r'(?:UP|DOWN|BULL|BEAR|3L|3S)USDT$')
-STABLE={'USDC','TUSD','BUSD','DAI','FDUSD','USDP','SUSD','UST','USTC','VAI','USDE','USDS','USDSB','USDSOLD','RLUSD','PYUSD','USD1','XUSD','BFUSD','AEUR','EURI','EUR','GBP','AUD','BRL','TRY','RUB','UAH','NGN','ZAR','BIDR','IDRT','BKRW'}
+ROOT = Path(__file__).resolve().parent
+OUT = ROOT / "artifacts"
+OUT.mkdir(parents=True, exist_ok=True)
 
-def now(): return datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
-def get(u,t=90):
- req=urllib.request.Request(u,headers={'User-Agent':'pump500-strict/1.0'})
- with urllib.request.urlopen(req,timeout=t) as r:return r.read()
+S3_LIST = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+ARCHIVE = "https://data.binance.vision/data/spot"
+MONTHS = ["2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06"]
+SCAN_START = 1767225600000  # 2026-01-01T00:00:00Z
+SCAN_END = 1782864000000    # 2026-07-01T00:00:00Z exclusive
+BAR_MS = 3_600_000
+EVENT_THRESHOLD = 0.20
+SEVERITY_THRESHOLDS = (0.20, 0.25, 0.30, 0.40, 0.50)
+BRAKE_MULT = 3.0
+LIQ_MIN = 100_000.0
+PRIOR_EVENT_BARS = 6
+DAY_BARS = 24
+BLOCK12_BARS = 12
+BASELINE_BLOCKS = 60
 
-def universe():
- sy=[]; marker=''; pages=0
- while 1:
-  from urllib.parse import quote
-  u=f'{S3}?delimiter=/&prefix=data/spot/monthly/klines/'+(('&marker='+quote(marker,safe='')) if marker else '')
-  x=get(u).decode(); pages+=1; p=re.findall(r'<Prefix>data/spot/monthly/klines/([^<]+)/</Prefix>',x); sy+=p
-  if '<IsTruncated>true</IsTruncated>' not in x: break
-  if not p: raise RuntimeError('bad S3 pagination')
-  marker=f'data/spot/monthly/klines/{p[-1]}/'
- us=sorted(set(s for s in sy if s.endswith('USDT'))); keep=[]; exc={}
- for s in us:
-  b=s[:-4]
-  if LEV.search(s): exc[s]='leveraged'
-  elif b in STABLE: exc[s]='stable_or_fiat'
-  else: keep.append(s)
- z={'generated_utc':now(),'source':S3,'pages':pages,'archive_symbols':len(set(sy)),'usdt':len(us),'kept':keep,'excluded':exc,'source_type':'REAL_OBSERVED'}
- (O/'P02_UNIVERSE.json').write_text(json.dumps(z,indent=2)); return keep,z
+LEVERAGED = re.compile(r"(?:UP|DOWN|BULL|BEAR|3L|3S)USDT$")
+STABLE_FIAT = {
+    "USDC", "TUSD", "BUSD", "DAI", "FDUSD", "USDP", "SUSD", "UST", "USTC", "VAI",
+    "USDE", "USDS", "USDSB", "USDSOLD", "RLUSD", "PYUSD", "USD1", "XUSD", "BFUSD",
+    "AEUR", "EURI", "EUR", "GBP", "AUD", "BRL", "TRY", "RUB", "UAH", "NGN", "ZAR",
+    "BIDR", "IDRT", "BKRW",
+}
 
-def urls(s,label):
- if label=='2026-07-01': n=f'{s}-1m-{label}.zip'; b=f'{A}/daily/klines/{s}/1m/{n}'
- else: n=f'{s}-1m-{label}.zip'; b=f'{A}/monthly/klines/{s}/1m/{n}'
- return b,b+'.CHECKSUM'
 
-def dl(s,label):
- u,c=urls(s,label); r={'symbol':s,'label':label,'url':u}
- try:
-  e=get(c).decode().split()[0].lower(); assert re.fullmatch(r'[0-9a-f]{64}',e)
-  p=get(u); a=hashlib.sha256(p).hexdigest(); assert a==e
-  r.update(status='OK',bytes=len(p),sha256=a); return p,r
- except urllib.error.HTTPError as x:r.update(status='SOURCE_UNAVAILABLE' if x.code==404 else 'HTTP_ERROR',http=x.code)
- except Exception as x:r.update(status='ERROR',error=type(x).__name__+':'+str(x))
- return None,r
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def frame(p):
- with zipfile.ZipFile(io.BytesIO(p)) as z:
-  ns=[n for n in z.namelist() if not n.endswith('/')]; assert len(ns)==1; raw=z.read(ns[0])
- d=pd.read_csv(io.BytesIO(raw),header=None,usecols=[0,1,2,3,4,7],names=['t','o','h','l','c','q'])
- d['t']=pd.to_numeric(d.t,errors='coerce'); d=d[d.t.notna()].copy()
- for c in ['t','o','h','l','c','q']: d[c]=pd.to_numeric(d[c],errors='coerce')
- d=d.dropna(); d['t']=d.t.astype('int64'); d.loc[d.t>10**14,'t']//=1000; return d
 
-def segments(d):
- d=d.drop_duplicates('t').sort_values('t').reset_index(drop=True); g=d.t.diff().fillna(M).ne(M).cumsum(); return [x.reset_index(drop=True) for _,x in d.groupby(g)]
+def iso_utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
-def scan_seg(s,d,rec):
- n=len(d)
- if n<43920:return {'bars':n,'cand':0,'eligible':0}
- t=d.t.to_numpy('int64'); o=d.o.to_numpy(float); h=d.h.to_numpy(float); l=d.l.to_numpy(float); q=d.q.to_numpy(float)
- hs=pd.Series(h); ls=pd.Series(l)
- ign=hs[::-1].rolling(15,min_periods=15).max()[::-1].to_numpy()/o-1
- peak=hs[::-1].rolling(720,min_periods=720).max()[::-1].to_numpy()/o-1
- p6h=hs.rolling(360,min_periods=360).max().shift(1).to_numpy(); p6l=ls.rolling(360,min_periods=360).min().shift(1).to_numpy()
- day=t//86400000; block=t//43200000
- dv={}
- for x in np.unique(day):
-  ix=np.flatnonzero(day==x)
-  if len(ix)==1440 and t[ix[-1]]-t[ix[0]]==1439*M:dv[int(x)]=float(q[ix].sum())
- br={}
- rr={}
- for x in np.unique(block):
-  ix=np.flatnonzero(block==x)
-  if len(ix)==720 and t[ix[-1]]-t[ix[0]]==719*M and o[ix[0]]>0:rr[int(x)]=float((h[ix].max()-l[ix].min())/o[ix[0]])
- for x in np.unique(block):
-  vals=[rr[y] for y in range(int(x)-60,int(x)) if y in rr]
-  if len(vals)==60:br[int(x)]=float(np.median(vals))
- ix=np.flatnonzero((t>=START)&(t<END)&np.isfinite(ign)&np.isfinite(peak)&(ign>=IGN)&(o>0)); el=0
- for i in ix:
-  v=dv.get(int(day[i])); b=br.get(int(block[i]))
-  if v is None or b is None or not np.isfinite(p6h[i]) or not np.isfinite(p6l[i]) or p6l[i]<=0:continue
-  el+=1; pr=float(p6h[i]/p6l[i]-1); pg=float(peak[i])
-  for z in TH:
-   if pg>=z and v>=LIQ and pr<z:rec[z].append({'symbol':s,'t_ref_ms':int(t[i]),'utc_day':int(day[i]),'ignition_gain':float(ign[i]),'peak_gain_12h':pg,'day_quote_volume':v,'prior6h_range':pr,'median_12h_range_prior30d':b,'brake_pass':pg>=BRAKE*b})
- return {'bars':n,'cand':len(ix),'eligible':el}
 
-def one(s):
- fs=[]; logs=[]
- with cf.ThreadPoolExecutor(max_workers=4) as ex:
-  fut=[ex.submit(dl,s,m) for m in MONTHS+['2026-07-01']]
-  for f in cf.as_completed(fut):
-   p,r=f.result(); logs.append(r)
-   if p:
-    try:fs.append(frame(p))
-    except Exception as x:r.update(status='PARSE_ERROR',error=str(x))
- rec={z:[] for z in TH}; q={'download':logs,'bars':0,'segments':0,'gaps':0,'cand':0,'eligible':0}
- if fs:
-  sg=segments(pd.concat(fs,ignore_index=True)); q['segments']=len(sg); q['gaps']=max(0,len(sg)-1)
-  for d in sg:
-   x=scan_seg(s,d,rec)
-   for k in ['bars','cand','eligible']:q[k]+=x[k]
- return s,q,rec
+def get(url: str, timeout: int = 90) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "pump500-strict-1h20/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read()
 
-def dedupe(a):
- out=[]; seen=set()
- for r in sorted(a,key=lambda x:(x['symbol'],x['t_ref_ms'])):
-  k=(r['symbol'],r['utc_day'])
-  if k not in seen:seen.add(k);out.append(r)
- return out
 
-def main():
- st=now(); sy,u=universe(); qual={}; allr={z:[] for z in TH}; t0=time.time()
- with cf.ThreadPoolExecutor(max_workers=int(os.getenv('PUMP500_WORKERS','6'))) as ex:
-  fs={ex.submit(one,s):s for s in sy}
-  for n,f in enumerate(cf.as_completed(fs),1):
-   s=fs[f]
-   try:
-    s,q,r=f.result();qual[s]=q
-    for z in TH:allr[z]+=r[z]
-   except Exception as x:qual[s]={'fatal':type(x).__name__+':'+str(x)}
-   if n%25==0:print(n,len(sy),round(time.time()-t0),flush=True)
- ladder={}
- for z in TH:
-  a=dedupe(allr[z]); b=[x for x in a if x['brake_pass']]; k=str(int(z*100))
-  ladder[k]={'unbraked_events':len(a),'braked_events':len(b),'symbols_braked':len({x['symbol'] for x in b})}
-  with (O/f'P01B_EVENTS_{k}PCT.jsonl').open('w') as f:
-   for x in b:f.write(json.dumps(x,separators=(',',':'))+'\n')
- sc=defaultdict(int); bad=[]
- for q in qual.values():
-  for r in q.get('download',[]):sc[r.get('status','UNKNOWN')]+=1; bad.extend([r] if r.get('status')!='OK' else [])
- dq={'generated_utc':now(),'file_status_counts':dict(sc),'source_unavailable':bad,'per_symbol':qual,'gap_policy':'never cross or fill a non-1m gap','checksum_policy':'official .CHECKSUM SHA-256 required'}
- (O/'P01B_DATA_QUALITY.json').write_text(json.dumps(dq,indent=2))
- res={'study':'pump500_strict_fresh_20260724','started_utc':st,'completed_utc':now(),'fresh_data_only':True,'prior_results_used':False,'period':{'scan':'2026-01-01..2026-06-30','warmup':'2025-12','forward':'2026-07-01 daily'},'definition':{'ignition':'1m sliding 15m high/open >=3%','peak':'next 720 complete 1m bars','brake':'peak >=3x median previous 60 complete UTC 12h blocks','liquidity':'complete UTC event-day quote volume >=100000','cleanliness':'complete prior 360m range below threshold','dedupe':'first per symbol per UTC day per threshold'},'ladder':ladder,'p01_status':'PENDING_OPERATOR_FREEZE_AFTER_FRESH_LADDER','p02_status':'DONE_VERIFIED','p03_status':'DONE_VERIFIED'}
- (O/'P01B_STRICT_RESULT.json').write_text(json.dumps(res,indent=2))
- L=['# P01b — Yeni Veri / 1 Dakika / Harfiyen','', '| Eşik | Frensiz | Frenli ≥3× | Sembol |','|---:|---:|---:|---:|']
- for z in TH:
-  x=ladder[str(int(z*100))];L.append(f"| ≥+%{int(z*100)} | {x['unbraked_events']} | **{x['braked_events']}** | {x['symbols_braked']} |")
- L+=['','P01 bu tablo operatöre sunulmadan dondurulmaz.',f'Checksum/dosya durumları: {dict(sc)}'];(O/'P01B_STRICT_TABLE.md').write_text('\n'.join(L));print('\n'.join(L))
-if __name__=='__main__':main()
+def build_universe() -> tuple[list[str], dict]:
+    symbols: list[str] = []
+    marker = ""
+    pages = 0
+    while True:
+        from urllib.parse import quote
+        url = f"{S3_LIST}?delimiter=/&prefix=data/spot/monthly/klines/"
+        if marker:
+            url += "&marker=" + quote(marker, safe="")
+        text = get(url).decode("utf-8", "replace")
+        pages += 1
+        prefixes = re.findall(r"<Prefix>data/spot/monthly/klines/([^<]+)/</Prefix>", text)
+        symbols.extend(prefixes)
+        if "<IsTruncated>true</IsTruncated>" not in text:
+            break
+        if not prefixes:
+            raise RuntimeError("S3 listing truncated without continuation prefix")
+        marker = f"data/spot/monthly/klines/{prefixes[-1]}/"
+
+    usdt = sorted(set(symbol for symbol in symbols if symbol.endswith("USDT")))
+    kept: list[str] = []
+    excluded: dict[str, str] = {}
+    for symbol in usdt:
+        base = symbol[:-4]
+        if LEVERAGED.search(symbol):
+            excluded[symbol] = "leveraged_token"
+        elif base in STABLE_FIAT:
+            excluded[symbol] = "stable_or_fiat_base"
+        else:
+            kept.append(symbol)
+
+    evidence = {
+        "generated_utc": utc_now(),
+        "source": S3_LIST,
+        "listing_pages": pages,
+        "all_archive_symbols": len(set(symbols)),
+        "usdt_symbols": len(usdt),
+        "kept_count": len(kept),
+        "excluded_count": len(excluded),
+        "kept": kept,
+        "excluded": excluded,
+        "source_type": "REAL_OBSERVED",
+    }
+    (OUT / "P02_UNIVERSE.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
+    return kept, evidence
+
+
+def archive_urls(symbol: str, month: str) -> tuple[str, str]:
+    name = f"{symbol}-1h-{month}.zip"
+    base = f"{ARCHIVE}/monthly/klines/{symbol}/1h/{name}"
+    return base, base + ".CHECKSUM"
+
+
+def verified_download(symbol: str, month: str) -> tuple[bytes | None, dict]:
+    data_url, checksum_url = archive_urls(symbol, month)
+    record = {"symbol": symbol, "month": month, "url": data_url, "checksum_url": checksum_url}
+    try:
+        checksum_text = get(checksum_url).decode("utf-8", "replace").strip()
+        expected = checksum_text.split()[0].lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("invalid_checksum_format")
+        payload = get(data_url)
+        actual = hashlib.sha256(payload).hexdigest()
+        if actual != expected:
+            record.update(status="CHECKSUM_MISMATCH", expected_sha256=expected, actual_sha256=actual)
+            return None, record
+        record.update(status="OK", bytes=len(payload), sha256=actual)
+        return payload, record
+    except urllib.error.HTTPError as exc:
+        record.update(status="SOURCE_UNAVAILABLE" if exc.code == 404 else "HTTP_ERROR", http_code=exc.code)
+    except Exception as exc:  # evidence records the exact failure
+        record.update(status="ERROR", error=f"{type(exc).__name__}:{exc}")
+    return None, record
+
+
+def read_zip(payload: bytes, source_label: str) -> pd.DataFrame:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        members = [name for name in archive.namelist() if not name.endswith("/")]
+        if len(members) != 1:
+            raise ValueError(f"{source_label}: expected one member, got {len(members)}")
+        raw = archive.read(members[0])
+    frame = pd.read_csv(
+        io.BytesIO(raw), header=None, usecols=[0, 1, 2, 3, 4, 7],
+        names=["open_time", "open", "high", "low", "close", "quote_volume"],
+    )
+    frame["open_time"] = pd.to_numeric(frame["open_time"], errors="coerce")
+    frame = frame[frame["open_time"].notna()].copy()
+    for column in ("open_time", "open", "high", "low", "close", "quote_volume"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna()
+    frame["open_time"] = frame["open_time"].astype("int64")
+    frame.loc[frame["open_time"] > 100_000_000_000_000, "open_time"] //= 1000
+    return frame
+
+
+def contiguous_segments(frame: pd.DataFrame) -> list[pd.DataFrame]:
+    if frame.empty:
+        return []
+    frame = frame.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+    group = frame["open_time"].diff().fillna(BAR_MS).ne(BAR_MS).cumsum()
+    return [segment.reset_index(drop=True) for _, segment in frame.groupby(group, sort=False)]
+
+
+def complete_day_volume(segment: pd.DataFrame) -> dict[int, float]:
+    times = segment["open_time"].to_numpy(dtype=np.int64)
+    days = times // 86_400_000
+    volumes = segment["quote_volume"].to_numpy(dtype=float)
+    result: dict[int, float] = {}
+    for day in np.unique(days):
+        indexes = np.flatnonzero(days == day)
+        if len(indexes) == DAY_BARS and times[indexes[-1]] - times[indexes[0]] == (DAY_BARS - 1) * BAR_MS:
+            result[int(day)] = float(volumes[indexes].sum())
+    return result
+
+
+def baseline_by_block(segment: pd.DataFrame) -> dict[int, float]:
+    times = segment["open_time"].to_numpy(dtype=np.int64)
+    blocks = times // 43_200_000
+    opens = segment["open"].to_numpy(dtype=float)
+    highs = segment["high"].to_numpy(dtype=float)
+    lows = segment["low"].to_numpy(dtype=float)
+    complete_ranges: dict[int, float] = {}
+    for block in np.unique(blocks):
+        indexes = np.flatnonzero(blocks == block)
+        if len(indexes) != BLOCK12_BARS:
+            continue
+        if times[indexes[-1]] - times[indexes[0]] != (BLOCK12_BARS - 1) * BAR_MS:
+            continue
+        reference = opens[indexes[0]]
+        if reference > 0:
+            complete_ranges[int(block)] = float((highs[indexes].max() - lows[indexes].min()) / reference)
+    result: dict[int, float] = {}
+    for block in np.unique(blocks):
+        prior = [complete_ranges[b] for b in range(int(block) - BASELINE_BLOCKS, int(block)) if b in complete_ranges]
+        if len(prior) == BASELINE_BLOCKS:
+            result[int(block)] = float(np.median(prior))
+    return result
+
+
+def scan_segment(symbol: str, segment: pd.DataFrame) -> tuple[list[dict], dict]:
+    if len(segment) < BASELINE_BLOCKS * BLOCK12_BARS + DAY_BARS:
+        return [], {"bars": len(segment), "raw_candidates": 0, "eligible": 0}
+
+    times = segment["open_time"].to_numpy(dtype=np.int64)
+    opens = segment["open"].to_numpy(dtype=float)
+    highs = segment["high"].to_numpy(dtype=float)
+    closes = segment["close"].to_numpy(dtype=float)
+    wick_gain = highs / opens - 1.0
+    body_gain = closes / opens - 1.0
+    prior_max = pd.Series(wick_gain).rolling(PRIOR_EVENT_BARS, min_periods=1).max().shift(1).to_numpy()
+    days = times // 86_400_000
+    blocks = times // 43_200_000
+    day_volume = complete_day_volume(segment)
+    baseline = baseline_by_block(segment)
+
+    candidate_indexes = np.flatnonzero(
+        (times >= SCAN_START) & (times < SCAN_END) & (opens > 0) &
+        np.isfinite(wick_gain) & (wick_gain >= EVENT_THRESHOLD)
+    )
+    events: list[dict] = []
+    skip_counts: defaultdict[str, int] = defaultdict(int)
+    for index in candidate_indexes:
+        volume = day_volume.get(int(days[index]))
+        normal_range = baseline.get(int(blocks[index]))
+        if volume is None:
+            skip_counts["event_day_volume_incomplete"] += 1
+            continue
+        if normal_range is None:
+            skip_counts["prior_30d_baseline_incomplete"] += 1
+            continue
+        if volume < LIQ_MIN:
+            skip_counts["below_liquidity_floor"] += 1
+            continue
+        if np.isfinite(prior_max[index]) and prior_max[index] >= EVENT_THRESHOLD:
+            skip_counts["continuation_prior_6h"] += 1
+            continue
+
+        gain = float(wick_gain[index])
+        event = {
+            "symbol": symbol,
+            "t_ref_ms": int(times[index]),
+            "event_timestamp_utc": iso_utc(int(times[index])),
+            "candle_close_utc": iso_utc(int(times[index] + BAR_MS - 1)),
+            "interval": "1h",
+            "open": float(opens[index]),
+            "high": float(highs[index]),
+            "close": float(closes[index]),
+            "wick_gain_pct": gain * 100.0,
+            "body_gain_pct": float(body_gain[index]) * 100.0,
+            "event_rule": "(1h_high / 1h_open - 1) >= 0.20; wick included",
+            "event_day_quote_volume": float(volume),
+            "median_12h_range_prior30d": float(normal_range),
+            "brake_pass": bool(gain >= BRAKE_MULT * normal_range),
+            "source_type": "REAL_OBSERVED",
+        }
+        events.append(event)
+
+    return events, {
+        "bars": len(segment),
+        "raw_candidates": int(len(candidate_indexes)),
+        "eligible": len(events),
+        "skipped": dict(skip_counts),
+    }
+
+
+def process_symbol(symbol: str) -> tuple[str, dict, list[dict]]:
+    frames: list[pd.DataFrame] = []
+    download_records: list[dict] = []
+    with cf.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(verified_download, symbol, month) for month in MONTHS]
+        for future in cf.as_completed(futures):
+            payload, record = future.result()
+            download_records.append(record)
+            if payload is not None:
+                try:
+                    frames.append(read_zip(payload, f"{symbol}:{record['month']}"))
+                except Exception as exc:
+                    record.update(status="PARSE_ERROR", error=f"{type(exc).__name__}:{exc}")
+
+    quality = {"downloads": download_records, "bars": 0, "segments": 0, "gaps": 0, "raw_candidates": 0, "eligible": 0, "skipped": {}}
+    events: list[dict] = []
+    if frames:
+        segments = contiguous_segments(pd.concat(frames, ignore_index=True))
+        quality["segments"] = len(segments)
+        quality["gaps"] = max(0, len(segments) - 1)
+        skipped: defaultdict[str, int] = defaultdict(int)
+        for segment in segments:
+            segment_events, stats = scan_segment(symbol, segment)
+            events.extend(segment_events)
+            quality["bars"] += stats["bars"]
+            quality["raw_candidates"] += stats["raw_candidates"]
+            quality["eligible"] += stats["eligible"]
+            for key, value in stats.get("skipped", {}).items():
+                skipped[key] += value
+        quality["skipped"] = dict(skipped)
+    return symbol, quality, events
+
+
+def dedupe_first_per_symbol_day(events: list[dict]) -> tuple[list[dict], int]:
+    kept: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    removed = 0
+    for event in sorted(events, key=lambda item: (item["symbol"], item["t_ref_ms"])):
+        key = (event["symbol"], event["t_ref_ms"] // 86_400_000)
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        kept.append(event)
+    return kept, removed
+
+
+def main() -> None:
+    started = utc_now()
+    symbols, universe = build_universe()
+    all_events: list[dict] = []
+    per_symbol: dict[str, dict] = {}
+    began = time.time()
+
+    with cf.ThreadPoolExecutor(max_workers=int(os.getenv("PUMP500_WORKERS", "6"))) as executor:
+        futures = {executor.submit(process_symbol, symbol): symbol for symbol in symbols}
+        for number, future in enumerate(cf.as_completed(futures), start=1):
+            symbol = futures[future]
+            try:
+                symbol, quality, events = future.result()
+                per_symbol[symbol] = quality
+                all_events.extend(events)
+            except Exception as exc:
+                per_symbol[symbol] = {"fatal": f"{type(exc).__name__}:{exc}"}
+            if number % 25 == 0:
+                print(number, len(symbols), round(time.time() - began), flush=True)
+
+    deduped, same_day_removed = dedupe_first_per_symbol_day(all_events)
+    braked = [event for event in deduped if event["brake_pass"]]
+    severity = {}
+    for threshold in SEVERITY_THRESHOLDS:
+        key = str(int(threshold * 100))
+        raw_subset = [event for event in deduped if event["wick_gain_pct"] >= threshold * 100]
+        braked_subset = [event for event in braked if event["wick_gain_pct"] >= threshold * 100]
+        severity[key] = {
+            "events_after_liquidity_cleanliness_dedupe": len(raw_subset),
+            "events_after_3x_volatility_brake": len(braked_subset),
+            "symbols_after_brake": len({event["symbol"] for event in braked_subset}),
+        }
+
+    for filename, rows in (("P01_EVENTS_20PCT_ALL.jsonl", deduped), ("P01_EVENTS_20PCT_BRAKED.jsonl", braked)):
+        with (OUT / filename).open("w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    file_status: defaultdict[str, int] = defaultdict(int)
+    unavailable: list[dict] = []
+    for quality in per_symbol.values():
+        for record in quality.get("downloads", []):
+            status = record.get("status", "UNKNOWN")
+            file_status[status] += 1
+            if status != "OK":
+                unavailable.append(record)
+
+    data_quality = {
+        "generated_utc": utc_now(),
+        "file_status_counts": dict(file_status),
+        "source_unavailable": unavailable,
+        "per_symbol": per_symbol,
+        "gap_policy": "never cross or fill a non-1h gap",
+        "checksum_policy": "official .CHECKSUM SHA-256 required",
+    }
+    (OUT / "P01_DATA_QUALITY.json").write_text(json.dumps(data_quality, ensure_ascii=False, indent=2))
+
+    result = {
+        "study": "pump500_strict_fresh_20260724",
+        "started_utc": started,
+        "completed_utc": utc_now(),
+        "fresh_data_only": True,
+        "prior_results_used": False,
+        "period": {"scan": "2026-01-01T00:00:00Z..2026-07-01T00:00:00Z", "warmup": "2025-12"},
+        "definition": {
+            "event": "official Binance 1h candle (high/open - 1) >= 0.20",
+            "wick_included": True,
+            "t_ref": "1h candle open timestamp in UTC, second precision",
+            "liquidity": "complete UTC event-day quote volume >= 100000 USDT",
+            "cleanliness": "no prior qualifying 1h +20% wick candle in previous complete 6h",
+            "volatility_brake": "1h wick gain >= 3x median range of previous 60 complete UTC 12h blocks",
+            "dedupe": "first eligible event per symbol per UTC day",
+        },
+        "main_event_count_before_brake": len(deduped),
+        "main_event_count_after_brake": len(braked),
+        "main_symbol_count_after_brake": len({event["symbol"] for event in braked}),
+        "same_symbol_day_duplicates_removed": same_day_removed,
+        "severity_census": severity,
+        "p01_status": "FROZEN_BY_OPERATOR_1H_WICK_20PCT",
+        "p01b_status": "THRESHOLD_SELECTION_SUPERSEDED_BY_OPERATOR_FIXED_20PCT",
+        "p02_status": "DONE_VERIFIED",
+        "p03_status": "DONE_VERIFIED",
+        "p05_plus_status": "CLOSED_UNTIL_P01_CENSUS_VALIDATED",
+        "universe_summary": {"kept_count": universe["kept_count"], "excluded_count": universe["excluded_count"]},
+    }
+    (OUT / "P01_STRICT_RESULT.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+
+    lines = [
+        "# P01 — 1 Saatlik Mumda Fitil Dahil +%20 Pump Sayımı",
+        "",
+        "Ana tanım: `(1h high / 1h open - 1) >= 0.20`; fitil dahildir.",
+        "",
+        "| Mum içi yükseliş | Temizlik+likidite sonrası | 3× oynaklık freni sonrası | Coin |",
+        "|---:|---:|---:|---:|",
+    ]
+    for threshold in SEVERITY_THRESHOLDS:
+        row = severity[str(int(threshold * 100))]
+        lines.append(
+            f"| ≥ +%{int(threshold * 100)} | {row['events_after_liquidity_cleanliness_dedupe']} | "
+            f"**{row['events_after_3x_volatility_brake']}** | {row['symbols_after_brake']} |"
+        )
+    lines.extend(["", "P01 operatör direktifiyle +%20 olarak donmuştur.", f"Dosya durumları: {dict(file_status)}"])
+    (OUT / "P01_STRICT_TABLE.md").write_text("\n".join(lines))
+    print("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()
