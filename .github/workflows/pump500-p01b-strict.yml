@@ -1,4 +1,4 @@
-name: Pump500 P01b Strict Fresh Data
+name: Pump500 P01 Strict Fresh 1h Wick 20pct
 
 on:
   push:
@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  p01b:
+  p01:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -35,31 +35,45 @@ jobs:
           python -m pip install 'numpy==2.2.6' 'pandas==2.2.3'
       - name: Prove clean run boundary
         run: |
-          test ! -e research/pump500_strict/artifacts/P01B_STRICT_RESULT.json
+          test ! -e research/pump500_strict/artifacts/P01_STRICT_RESULT.json
           test ! -e research/pump500_strict/_fresh_raw
-      - name: Download official 1m data and run P01b
+      - name: Download official 1h data and run P01 census
         run: python research/pump500_strict/p01b.py
-      - name: Validate evidence
+      - name: Validate exact event definition and evidence
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
-          p=Path('research/pump500_strict/artifacts/P01B_STRICT_RESULT.json')
-          x=json.loads(p.read_text())
-          assert x['fresh_data_only'] and not x['prior_results_used']
-          c=[x['ladder'][str(i)]['braked_events'] for i in (5,10,15,20,30)]
-          assert c==sorted(c,reverse=True),c
-          assert x['p01_status']=='PENDING_OPERATOR_FREEZE_AFTER_FRESH_LADDER'
-          print('validated',c)
+          root=Path('research/pump500_strict/artifacts')
+          result=json.loads((root/'P01_STRICT_RESULT.json').read_text())
+          assert result['fresh_data_only'] is True
+          assert result['prior_results_used'] is False
+          assert result['definition']['event']=='official Binance 1h candle (high/open - 1) >= 0.20'
+          assert result['definition']['wick_included'] is True
+          assert result['p01_status']=='FROZEN_BY_OPERATOR_1H_WICK_20PCT'
+          rows=[]
+          for line in (root/'P01_EVENTS_20PCT_ALL.jsonl').read_text().splitlines():
+              if line.strip(): rows.append(json.loads(line))
+          assert all(r['interval']=='1h' for r in rows)
+          assert all(r['wick_gain_pct'] >= 20.0 for r in rows)
+          assert all(r['event_rule']=='(1h_high / 1h_open - 1) >= 0.20; wick included' for r in rows)
+          severity=[result['severity_census'][str(x)]['events_after_3x_volatility_brake'] for x in (20,25,30,40,50)]
+          assert severity==sorted(severity,reverse=True),severity
+          print('validated',len(rows),severity)
           PY
       - name: Hash evidence files
         run: |
           cd research/pump500_strict
           find artifacts -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
-          printf '%s\n' 'fresh official Binance archive only' '1-minute resolution' 'no old cohorts/counts/cache' 'no live services or DB touched' > artifacts/RUN_BOUNDARY.txt
+          printf '%s\n' \
+            'fresh official Binance archive only' \
+            'native 1-hour candles' \
+            'event=(high/open-1)>=20 percent; wick included' \
+            'no old cohorts/counts/cache' \
+            'no live services or DB touched' > artifacts/RUN_BOUNDARY.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: pump500-p01b-strict-fresh-data
+          name: pump500-p01-strict-fresh-1h-wick-20pct
           path: research/pump500_strict/artifacts/
           if-no-files-found: error
           retention-days: 30
