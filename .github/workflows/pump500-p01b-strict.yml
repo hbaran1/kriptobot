@@ -1,0 +1,94 @@
+name: Pump500 P01 Fresh Rolling 365d Direct Binance
+
+on:
+  push:
+    branches:
+      - research/pump500-strict-fresh-20260724
+    paths:
+      - 'research/pump500_strict/**'
+      - '.github/workflows/pump500-p01b-strict.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/pump500_strict/**'
+      - '.github/workflows/pump500-p01b-strict.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  p01:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PUMP500_WORKERS: '6'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'numpy==2.2.6' 'pandas==2.2.3'
+      - name: Prove clean run boundary
+        run: |
+          test ! -e research/pump500_strict/artifacts/P01_STRICT_RESULT.json
+          test ! -e research/pump500_strict/_fresh_raw
+      - name: Download all source data directly from Binance and run rolling one-year census
+        run: python research/pump500_strict/run_rolling_1y.py
+      - name: Validate exact period, source boundary and event definition
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('research/pump500_strict/artifacts')
+          result=json.loads((root/'P01_STRICT_RESULT.json').read_text())
+          dq=json.loads((root/'P01_DATA_QUALITY.json').read_text())
+          assert result['fresh_data_only'] is True
+          assert result['prior_results_used'] is False
+          assert result['direct_binance_only'] is True
+          assert result['period']['scan_start_utc']=='2025-07-24T00:00:00Z'
+          assert result['period']['scan_end_utc_exclusive']=='2026-07-24T00:00:00Z'
+          assert result['period']['duration_days']==365
+          assert result['definition']['event']=='official Binance 1h candle (high/open - 1) >= 0.20'
+          assert result['definition']['wick_included'] is True
+          assert result['p01_status']=='FROZEN_BY_OPERATOR_1H_WICK_20PCT'
+          assert dq['direct_binance_only'] is True
+          assert len(dq.get('hard_failures',[]))==0, dq.get('hard_failures',[])[:5]
+          rows=[json.loads(line) for line in (root/'P01_EVENTS_20PCT_ALL.jsonl').read_text().splitlines() if line.strip()]
+          start=1753315200000; end=1784851200000
+          assert all(start <= r['t_ref_ms'] < end for r in rows)
+          assert all(r['interval']=='1h' for r in rows)
+          assert all(r['wick_gain_pct'] >= 20.0 for r in rows)
+          assert all(r['event_rule']=='(1h_high / 1h_open - 1) >= 0.20; wick included' for r in rows)
+          severity=[result['severity_census'][str(x)]['events_after_3x_volatility_brake'] for x in (20,25,30,40,50)]
+          assert severity==sorted(severity,reverse=True),severity
+          print('validated',len(rows),severity,dq['file_status_counts'])
+          PY
+      - name: Write run boundary
+        run: |
+          cd research/pump500_strict
+          printf '%s\n' \
+            'all source data fetched during this run directly from official Binance endpoints' \
+            'rolling scan=2025-07-24T00:00:00Z..2026-07-24T00:00:00Z exclusive' \
+            'native 1-hour candles' \
+            'event=(high/open-1)>=20 percent; wick included' \
+            'monthly archives require official Binance SHA-256 CHECKSUM' \
+            'July 2026 Binance API raw-response SHA-256 recorded' \
+            'no old cohorts/results/counts/cache' \
+            'no live services or production DB touched' > artifacts/RUN_BOUNDARY.txt
+      - name: Hash evidence files
+        run: |
+          cd research/pump500_strict
+          rm -f artifacts/SHA256SUMS.txt
+          find artifacts -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
+          sha256sum -c artifacts/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pump500-p01-fresh-rolling-365d-direct-binance
+          path: research/pump500_strict/artifacts/
+          if-no-files-found: error
+          retention-days: 30
