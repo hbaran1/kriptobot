@@ -7,6 +7,11 @@ on:
     paths:
       - 'research/pump500_strict/**'
       - '.github/workflows/pump500-p01b-strict.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/pump500_strict/**'
+      - '.github/workflows/pump500-p01b-strict.yml'
   workflow_dispatch:
 
 permissions:
