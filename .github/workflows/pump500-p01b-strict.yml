@@ -1,0 +1,59 @@
+name: Pump500 P01b Strict Fresh Data
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/pump500_strict/**'
+      - '.github/workflows/pump500-p01b-strict.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  p01b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PUMP500_WORKERS: '6'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'numpy==2.2.6' 'pandas==2.2.3'
+      - name: Prove clean run boundary
+        run: |
+          test ! -e research/pump500_strict/artifacts/P01B_STRICT_RESULT.json
+          test ! -e research/pump500_strict/_fresh_raw
+      - name: Download official 1m data and run P01b
+        run: python research/pump500_strict/p01b.py
+      - name: Validate evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('research/pump500_strict/artifacts/P01B_STRICT_RESULT.json')
+          x=json.loads(p.read_text())
+          assert x['fresh_data_only'] and not x['prior_results_used']
+          c=[x['ladder'][str(i)]['braked_events'] for i in (5,10,15,20,30)]
+          assert c==sorted(c,reverse=True),c
+          assert x['p01_status']=='PENDING_OPERATOR_FREEZE_AFTER_FRESH_LADDER'
+          print('validated',c)
+          PY
+      - name: Hash evidence files
+        run: |
+          cd research/pump500_strict
+          find artifacts -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
+          printf '%s\n' 'fresh official Binance archive only' '1-minute resolution' 'no old cohorts/counts/cache' 'no live services or DB touched' > artifacts/RUN_BOUNDARY.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pump500-p01b-strict-fresh-data
+          path: research/pump500_strict/artifacts/
+          if-no-files-found: error
+          retention-days: 30
