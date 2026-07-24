@@ -1,0 +1,84 @@
+name: Pump500 Discriminator 12M Frozen P01
+on:
+  push:
+    branches: [research/pump500-discriminator-12m-frozen]
+    paths: ['research/pump500_discriminator_12m/**','.github/workflows/pump500-discriminator-12m-frozen.yml']
+  pull_request:
+    branches: [main]
+    paths: ['research/pump500_discriminator_12m/**','.github/workflows/pump500-discriminator-12m-frozen.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cohort-matching:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install 'numpy==2.2.6' 'pandas==2.2.3' 'requests==2.32.4'
+      - name: Prove clean frozen boundary
+        working-directory: research/pump500_discriminator_12m
+        run: |
+          test ! -e data && test ! -e artifacts
+          grep -F 'IGN_GAIN=.03' ladder.py
+          grep -F 'CASE_THR=.20' cases.py
+          grep -F 'TRAIN_TEST_SPLIT_MS=1777593600000' cases.py
+          ! test -e model.py
+      - name: Build universe
+        working-directory: research/pump500_discriminator_12m
+        run: python ladder.py universe
+      - name: Download direct from Binance and verify every checksum
+        working-directory: research/pump500_discriminator_12m
+        run: python ladder.py download
+      - name: Mandatory source gate
+        working-directory: research/pump500_discriminator_12m
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          a=Path('artifacts'); r=json.loads((a/'download_report.json').read_text()); m=json.loads((a/'SOURCE_MANIFEST.json').read_text())
+          assert r['hard_failure_count']==0,r
+          assert r['verified_files']+r['source_unavailable']==r['jobs'],r
+          for x in m:
+            if x['status'] in {'downloaded_verified','verified_cached'}: assert x['expected_sha256']==x['actual_sha256'] and x['bytes']>0,x
+            else: assert x['status']=='SOURCE_UNAVAILABLE',x
+          print('SOURCE GATE PASS',r['status'])
+          PY
+      - name: Frozen P01 census and registry
+        working-directory: research/pump500_discriminator_12m
+        run: |
+          python ladder.py scan
+          python cases.py
+      - name: Four-control matching and SMD gate
+        working-directory: research/pump500_discriminator_12m
+        run: python controls.py
+      - name: Filter funnel and holdout lock
+        working-directory: research/pump500_discriminator_12m
+        run: |
+          python filter_funnel.py
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          a=Path('artifacts'); f=json.loads((a/'FILTER_FUNNEL.json').read_text()); c=json.loads((a/'controls.json').read_text())
+          assert f['period']['test_boundary']=='2026-05-01'
+          assert f['period']['test_status']=='LOCKED_NOT_EVALUATED'
+          assert f['p17_plus_status']=='CLOSED'
+          assert c['balance']['PASS'] is True
+          forbidden=['metrics_test.json','fine_test.json','power.json','model.json','test_performance.json']
+          assert not any((a/x).exists() for x in forbidden)
+          print('HOLDOUT LOCK PASS')
+          PY
+      - name: Hash evidence
+        working-directory: research/pump500_discriminator_12m
+        run: |
+          find artifacts -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
+          sha256sum -c artifacts/SHA256SUMS.txt
+          printf '%s\n' 'P01 frozen' 'period 2025-07-01..2026-06-30; June 2025 warmup' 'Binance checksum mandatory' 'SMD<0.10' 'TEST locked at 2026-05-01' 'P17-P20 closed' > artifacts/RUN_BOUNDARY.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pump500-discriminator-12m-cohort-matching
+          path: research/pump500_discriminator_12m/artifacts/
+          if-no-files-found: error
+          retention-days: 30
