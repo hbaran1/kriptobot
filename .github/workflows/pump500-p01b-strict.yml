@@ -38,7 +38,7 @@ jobs:
           test ! -e research/pump500_strict/artifacts/P01_STRICT_RESULT.json
           test ! -e research/pump500_strict/_fresh_raw
       - name: Download official 1h data and run P01 census
-        run: python research/pump500_strict/p01b.py
+        run: python research/pump500_strict/run_fixed.py
       - name: Validate exact event definition and evidence
         run: |
           python - <<'PY'
@@ -46,31 +46,37 @@ jobs:
           from pathlib import Path
           root=Path('research/pump500_strict/artifacts')
           result=json.loads((root/'P01_STRICT_RESULT.json').read_text())
+          dq=json.loads((root/'P01_DATA_QUALITY.json').read_text())
           assert result['fresh_data_only'] is True
           assert result['prior_results_used'] is False
           assert result['definition']['event']=='official Binance 1h candle (high/open - 1) >= 0.20'
           assert result['definition']['wick_included'] is True
           assert result['p01_status']=='FROZEN_BY_OPERATOR_1H_WICK_20PCT'
-          rows=[]
-          for line in (root/'P01_EVENTS_20PCT_ALL.jsonl').read_text().splitlines():
-              if line.strip(): rows.append(json.loads(line))
+          assert dq['file_status_counts'].get('ERROR',0)==0, dq['file_status_counts']
+          rows=[json.loads(line) for line in (root/'P01_EVENTS_20PCT_ALL.jsonl').read_text().splitlines() if line.strip()]
           assert all(r['interval']=='1h' for r in rows)
           assert all(r['wick_gain_pct'] >= 20.0 for r in rows)
           assert all(r['event_rule']=='(1h_high / 1h_open - 1) >= 0.20; wick included' for r in rows)
           severity=[result['severity_census'][str(x)]['events_after_3x_volatility_brake'] for x in (20,25,30,40,50)]
           assert severity==sorted(severity,reverse=True),severity
-          print('validated',len(rows),severity)
+          print('validated',len(rows),severity,dq['file_status_counts'])
           PY
-      - name: Hash evidence files
+      - name: Write run boundary
         run: |
           cd research/pump500_strict
-          find artifacts -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
           printf '%s\n' \
             'fresh official Binance archive only' \
             'native 1-hour candles' \
             'event=(high/open-1)>=20 percent; wick included' \
+            'URL-encoded archive paths including non-ASCII symbols' \
             'no old cohorts/counts/cache' \
             'no live services or DB touched' > artifacts/RUN_BOUNDARY.txt
+      - name: Hash evidence files
+        run: |
+          cd research/pump500_strict
+          rm -f artifacts/SHA256SUMS.txt
+          find artifacts -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
+          sha256sum -c artifacts/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: pump500-p01-strict-fresh-1h-wick-20pct
