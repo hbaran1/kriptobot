@@ -1,8 +1,9 @@
 name: Pump500 P01b Strict Fresh Data
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches:
+      - research/pump500-strict-fresh-20260724
     paths:
       - 'research/pump500_strict/**'
       - '.github/workflows/pump500-p01b-strict.yml'
